@@ -574,7 +574,7 @@ impl Fetcher {
             warnings.append(&mut wallet_warnings);
         }
 
-        let mut rows = build_rows(&display, &markets, &amounts, focus_id.is_some());
+        let mut rows = build_rows(&display, &self.cfg.coins, &markets, &amounts, focus_id.is_some());
         if rows.is_empty() {
             bail!("{}", no_rows_message(&display, status));
         }
@@ -979,6 +979,7 @@ fn change_over_days(series: &Series, days: i64) -> Option<f64> {
 
 fn build_rows(
     display: &[String],
+    tracked: &[String],
     markets: &[Market],
     amounts: &BTreeMap<String, f64>,
     focused: bool,
@@ -987,13 +988,19 @@ fn build_rows(
         .iter()
         .filter_map(|id| {
             let market = markets.iter().find(|m| &m.id == id)?;
-            // Palette slot from the display order, which starts with the
-            // config's own — so a tracked coin keeps its colour, and a held
-            // but untracked one gets a slot of its own rather than sharing.
+            // A coin's colour is its place in `coins`, not its place on this
+            // screen. The two are the same in the views built out of the config,
+            // but `coins top` is ordered by the market: there SOL sits seventh
+            // and STRK far below, and both would take the palette's last slot
+            // and come out the same colour. Colour follows the coin.
             let color = if focused {
                 0
             } else {
-                display.iter().position(|c| c == id).unwrap_or(0)
+                tracked
+                    .iter()
+                    .position(|c| c == id)
+                    .or_else(|| display.iter().position(|c| c == id))
+                    .unwrap_or(0)
             };
             Some(Row {
                 market: market.clone(),
@@ -1110,6 +1117,33 @@ mod tests {
             "id": id, "symbol": id, "name": id, "market_cap": cap, "market_cap_rank": rank
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_coin_keeps_its_colour_whatever_the_screen_orders_by() {
+        let markets = vec![
+            ranked("bitcoin", 1e12, 1),
+            ranked("ethereum", 5e11, 2),
+            ranked("tether", 1e11, 3),
+            ranked("solana", 5e10, 7),
+            ranked("starknet", 1e8, 174),
+        ];
+        let tracked = vec![
+            "ethereum".to_string(),
+            "solana".to_string(),
+            "starknet".to_string(),
+        ];
+        // The market list puts strangers between them and pushes starknet far
+        // down; the palette slots must still be 0, 1, 2.
+        let display: Vec<String> = markets.iter().map(|m| m.id.clone()).collect();
+        let rows = build_rows(&display, &tracked, &markets, &BTreeMap::new(), false);
+        let slot = |id: &str| rows.iter().find(|r| r.market.id == id).unwrap().color;
+        assert_eq!((slot("ethereum"), slot("solana"), slot("starknet")), (0, 1, 2));
+        // Which is the same as in the view built straight out of the config.
+        let own = build_rows(&tracked, &tracked, &markets, &BTreeMap::new(), false);
+        for row in &own {
+            assert_eq!(row.color, slot(&row.market.id), "{} changed colour", row.market.id);
+        }
     }
 
     #[test]
