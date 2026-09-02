@@ -42,6 +42,7 @@ _coins() {
   cmds=(
     'plot:Draw the full-size plots'
     'balance:What each address holds, and its value'
+    'top:The largest coins, by market capitalisation'
     'add:Track a coin, or an address'
     'rm:Stop tracking a coin or address'
     'config:Print the config path, or edit it'
@@ -185,6 +186,7 @@ _coins() {
   if [ "$COMP_CWORD" -eq 1 ]; then
     _coins_offer "plot
 balance
+top
 add
 rm
 config

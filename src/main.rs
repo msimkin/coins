@@ -16,6 +16,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use config::Config;
+
+/// How many coins `coins top` lists when no number is given — the same fifty
+/// that ride along with every prices request, so the screen costs nothing.
+const TOP_DEFAULT: usize = 50;
 use data::{Fetcher, Match, View};
 use render::theme::{ColorLevel, Theme, term_width};
 
@@ -74,6 +78,12 @@ enum Command {
     },
     /// The full picture: prices, what each address holds, and your portfolio
     Balance,
+    /// The largest coins there are, by market capitalisation
+    Top {
+        /// How many to list, most valuable first
+        #[arg(value_name = "N")]
+        count: Option<usize>,
+    },
     /// Print the config path, open it, or add options a new version introduced
     Config {
         /// Open the file in $VISUAL, $EDITOR, or vi
@@ -157,9 +167,12 @@ fn run() -> Result<()> {
         Some(Command::Popular) => popular(&cfg),
         Some(Command::Completions { .. }) => Ok(()), // handled above
         Some(Command::Plot { coin }) => {
-            screen(cfg, &cli, &theme, View::Plot, coin.clone())
+            screen(cfg, &cli, &theme, View::Plot, coin.clone(), None)
         }
-        Some(Command::Balance) => screen(cfg, &cli, &theme, View::Balance, None),
+        Some(Command::Balance) => screen(cfg, &cli, &theme, View::Balance, None, None),
+        Some(Command::Top { count }) => {
+            screen(cfg, &cli, &theme, View::Top, None, Some(count.unwrap_or(TOP_DEFAULT)))
+        }
         Some(Command::Add { what, label }) => add(&cfg, what, label.as_deref(), &theme),
         Some(Command::Rm { what }) => remove(&cfg, what),
         Some(Command::Config { .. }) => Ok(()), // handled before the config is read
@@ -178,7 +191,7 @@ fn run() -> Result<()> {
             // `coins plot COIN`; with no argument, the list is the screen.
             let view = if cli.coin.is_some() { View::Plot } else { View::List };
             let coin = cli.coin.clone();
-            screen(cfg, &cli, &theme, view, coin)
+            screen(cfg, &cli, &theme, view, coin, None)
         }
     }
 }
@@ -189,14 +202,16 @@ fn screen(
     theme: &Theme,
     view: View,
     coin: Option<String>,
+    top_count: Option<usize>,
 ) -> Result<()> {
-    if cfg.coins.is_empty() && coin.is_none() {
+    // `coins top` needs nothing tracked: the market is the subject.
+    if cfg.coins.is_empty() && coin.is_none() && view != View::Top {
         bail!("nothing tracked yet — add a coin with `coins add bitcoin`");
     }
     let inline_plots = cfg.inline_plot && !cli.no_plot;
     let fetcher = Fetcher::new(cfg, cli.refresh)?;
     fetcher.validate_currency()?;
-    let snap = fetcher.snapshot(coin.as_deref(), view, inline_plots)?;
+    let snap = fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count)?;
     for line in render::screen(&snap, &fetcher.cfg, theme, term_width()) {
         println!("{line}");
     }

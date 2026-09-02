@@ -83,6 +83,8 @@ pub enum View {
     Plot,
     /// `coins balance` — what each address holds, and what it is worth.
     Balance,
+    /// `coins top` — the largest coins there are, by what they are worth.
+    Top,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +106,9 @@ pub struct Snapshot {
     pub show_table: bool,
     /// Whether the addresses group appears under the table.
     pub show_addresses: bool,
+    /// Which screen this is. The table needs it: `coins top` is a different
+    /// shape from the others, not the same one with more rows.
+    pub view: View,
     /// Whether the coins group appears at all. `balance = "addresses"` turns it
     /// off for that view, so the two commands divide the screen between them.
     pub show_coins: bool,
@@ -509,6 +514,7 @@ impl Fetcher {
         focus: Option<&str>,
         view: View,
         inline_plots: bool,
+        top_count: Option<usize>,
     ) -> Result<Snapshot> {
         let focus_id = match focus {
             Some(q) => Some(self.resolve_coin(q)?),
@@ -538,9 +544,14 @@ impl Fetcher {
         // predictably and without hinting at holdings; the holdings view adds
         // every coin you hold, so one is never invisible merely because it is
         // not in `coins`.
-        let show_addresses = view == View::Balance || self.cfg.show_addresses;
+        // `coins top` is about the market, so it says nothing about holdings
+        // however the config is set: a list of the largest coins is a thing you
+        // can show someone.
+        let show_addresses =
+            view != View::Top && (view == View::Balance || self.cfg.show_addresses);
         let display: Vec<String> = match &focus_id {
             Some(f) => vec![f.clone()],
+            None if view == View::Top => ranked_by_value(&markets, top_count.unwrap_or(usize::MAX)),
             None if show_addresses => self.cfg.quoted_coins(),
             None => self.cfg.coins.clone(),
         };
@@ -587,7 +598,12 @@ impl Fetcher {
             charted.clone()
         };
         self.attach_series(&mut rows, &want_series);
-        self.attach_month_changes(&mut rows);
+        // Not for the market list: a month column is a chart per coin, and this
+        // screen's whole point is that it costs nothing. It shows the columns
+        // the prices request already answers.
+        if view != View::Top {
+            self.attach_month_changes(&mut rows);
+        }
 
         // Each source is valued on its own, so it can have its own group of rows.
         let mut sources: Vec<HoldingSource> = per_wallet
@@ -620,6 +636,7 @@ impl Fetcher {
             currency: self.cfg.currency.clone(),
             range: self.cfg.range,
             plan,
+            view,
             show_table: plan == ChartPlan::Off,
             show_addresses,
             show_coins,
@@ -898,6 +915,25 @@ fn no_rows_message(display: &[String], status: Status) -> String {
     }
 }
 
+/// The coins in a set, most valuable first.
+///
+/// By market capitalisation — circulating supply times price — which is what
+/// "most valuable" means for a coin. Not by price per unit, which says only how
+/// finely a supply was divided: XRP at €1.16 is worth more than BNB at €592.
+/// Coins the API has no capitalisation for come last rather than first, and ties
+/// keep the order they arrived in.
+fn ranked_by_value(markets: &[Market], count: usize) -> Vec<String> {
+    let mut ranked: Vec<&Market> = markets.iter().collect();
+    ranked.sort_by(|a, b| {
+        let (x, y) = (
+            b.market_cap.unwrap_or(f64::MIN),
+            a.market_cap.unwrap_or(f64::MIN),
+        );
+        x.total_cmp(&y)
+    });
+    ranked.into_iter().take(count).map(|m| m.id.clone()).collect()
+}
+
 /// Percentage change across the last `days` of a chart. The window is measured
 /// back from the chart's own last point rather than from the clock, because the
 /// history lags the live quote by up to an hour.
@@ -1017,7 +1053,7 @@ fn plan_chart(view: View, focused: bool, count: usize) -> (ChartPlan, Vec<usize>
     }
     // Both the list and the holdings view are tables, not plots; only `price
     // plot` (and a named coin) draws a chart.
-    if matches!(view, View::List | View::Balance) {
+    if matches!(view, View::List | View::Balance | View::Top) {
         return (ChartPlan::Off, Vec::new());
     }
     if focused || count == 1 {
@@ -1029,6 +1065,41 @@ fn plan_chart(view: View, focused: bool, count: usize) -> (ChartPlan, Vec<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn market(id: &str, cap: Option<f64>) -> Market {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "symbol": id, "name": id, "market_cap": cap
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_market_list_is_ordered_by_what_a_coin_is_worth() {
+        // Price per unit says nothing: the cheap coin here is the valuable one.
+        let markets = vec![
+            market("expensive-and-small", Some(1e9)),
+            market("cheap-and-huge", Some(1e12)),
+            market("unranked", None),
+            market("middling", Some(5e10)),
+        ];
+        let order = ranked_by_value(&markets, 10);
+        assert_eq!(order, ["cheap-and-huge", "middling", "expensive-and-small", "unranked"]);
+        // A coin the API has no capitalisation for goes last, never first.
+        assert_eq!(order.last().unwrap(), "unranked");
+        // And the count is a ceiling, not a promise.
+        assert_eq!(ranked_by_value(&markets, 2).len(), 2);
+        assert_eq!(ranked_by_value(&markets, 99).len(), 4);
+    }
+
+    #[test]
+    fn coins_of_equal_value_keep_the_order_they_arrived_in() {
+        let markets = vec![
+            market("first", Some(2e9)),
+            market("second", Some(2e9)),
+            market("third", Some(2e9)),
+        ];
+        assert_eq!(ranked_by_value(&markets, 3), ["first", "second", "third"]);
+    }
 
     #[test]
     fn an_empty_screen_says_which_thing_went_wrong() {

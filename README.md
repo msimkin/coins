@@ -43,6 +43,7 @@ coins add sol         # track a coin, by ticker, name or CoinGecko id
 coins add 0xd8dA…     # track an address; its balances become holdings
 coins rm sol          # stop tracking a coin or an address
 coins balance         # prices, what each address holds, and the portfolio
+coins top             # the fifty largest coins, by market capitalisation
 coins config --edit   # open the config in $EDITOR
 ```
 
@@ -136,6 +137,13 @@ unreachable. No extra request: about 200 KB in place of 13, since a week of hist
 is roughly 3 KB a coin. A chart over a longer range still costs one request for the
 coin you asked for — and when it cannot be made, the week stands in and the label
 says `7d` rather than claiming the range.
+
+`coins top` ranks those fifty by market capitalisation — circulating supply times
+price, which is what makes a coin large. Not by price per unit, which says only how
+finely a supply was divided: XRP at €1.16 is worth more than BNB at €592. It shows
+the periods the prices request answers, so like the coins themselves it costs no
+request; `coins top 10` shortens it. Which fifty they are is fixed by the built-in
+list and refreshed with it, so the membership is a snapshot while the order is live.
 
 Charts are cached in `~/.cache/coins` for five minutes to a day, depending on how
 fast the period moves. The top line always states the age of what you are looking at,

@@ -111,6 +111,29 @@ pub fn money(v: f64, currency: &str) -> String {
 
 /// A money value formatted to a fixed number of decimals, for a column where
 /// every row must share one precision.
+/// A large figure in as few characters as it can be read in: `€1.34T`, `€251B`,
+/// `€8.6M`. Three significant digits, which is the most anyone reads off a market
+/// capitalisation, and the unit letter the rest of the world uses.
+pub fn compact(v: f64, currency: &str) -> String {
+    let sign = if v < 0.0 { "-" } else { "" };
+    let n = v.abs();
+    let (scaled, unit) = match n {
+        _ if n >= 1e12 => (n / 1e12, "T"),
+        _ if n >= 1e9 => (n / 1e9, "B"),
+        _ if n >= 1e6 => (n / 1e6, "M"),
+        _ if n >= 1e3 => (n / 1e3, "K"),
+        _ => (n, ""),
+    };
+    // Three significant digits: 1.34T, 12.3B, 251B — never 1.3400000000001T.
+    let decimals = match scaled {
+        _ if unit.is_empty() => 2,
+        _ if scaled >= 100.0 => 0,
+        _ if scaled >= 10.0 => 1,
+        _ => 2,
+    };
+    format!("{sign}{}{scaled:.decimals$}{unit}", currency_symbol(currency))
+}
+
 pub fn money_with(v: f64, currency: &str, decimals: usize) -> String {
     format!("{}{}", currency_symbol(currency), group(v, decimals))
 }
@@ -385,6 +408,21 @@ mod tests {
         assert_eq!(span(Duration::from_secs(14)), "14s");
         assert_eq!(span(Duration::from_secs(200)), "3m");
         assert_eq!(span(Duration::from_secs(7300)), "2h");
+    }
+
+    #[test]
+    fn large_figures_read_in_three_digits() {
+        assert_eq!(compact(1_336_715_278_299.0, "eur"), "€1.34T");
+        assert_eq!(compact(251_025_554_279.0, "eur"), "€251B");
+        assert_eq!(compact(12_345_678_901.0, "eur"), "€12.3B");
+        assert_eq!(compact(8_600_000.0, "usd"), "$8.60M");
+        // Each boundary belongs to the unit above it.
+        assert_eq!(compact(999.0, "usd"), "$999.00");
+        assert_eq!(compact(1_000.0, "usd"), "$1.00K");
+        assert_eq!(compact(1_000_000.0, "usd"), "$1.00M");
+        assert_eq!(compact(1_000_000_000.0, "usd"), "$1.00B");
+        assert_eq!(compact(1e12, "usd"), "$1.00T");
+        assert_eq!(compact(0.0, "usd"), "$0.00");
     }
 
     #[test]

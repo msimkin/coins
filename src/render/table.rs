@@ -5,7 +5,7 @@
 //! ties each row to its line.
 
 use crate::config::Config;
-use crate::data::Snapshot;
+use crate::data::{Snapshot, View};
 use crate::render::fmt;
 use crate::render::theme::{SLine, Theme, vis_width};
 
@@ -297,6 +297,67 @@ fn coins_section(
     }
 }
 
+/// The market, largest first: rank, coin, name, price, what it is all worth, and
+/// the same change columns as everywhere else.
+///
+/// The chips are ink rather than colour, except for the coins in `coins` — the
+/// palette holds six hues and clamps past them, so fifty coloured rows would be
+/// forty-five identical dots, and "where do mine sit" is the only question this
+/// screen answers that a website does not.
+fn top_section(
+    snap: &Snapshot,
+    cfg: &Config,
+    style: Style,
+    decimals: usize,
+) -> Section {
+    // Only the periods the prices request answers: a `3m` or `6m` column is a
+    // chart per coin, and fifty of those is not a screen anyone should pay for.
+    let changes = cfg.market_columns();
+    let mut header = vec!["#".to_string(), "COIN".to_string()];
+    if style.with_name {
+        header.push(String::new());
+    }
+    header.push("PRICE".to_string());
+    header.push("MARKET CAP".to_string());
+    for c in &changes {
+        header.push(c.to_ascii_uppercase());
+    }
+
+    let mut rows = Vec::new();
+    for (i, row) in snap.rows.iter().enumerate() {
+        let m = &row.market;
+        let tracked = cfg.coins.iter().any(|c| c == &m.id);
+        let chip = format!("● {}", m.ticker());
+        let mut cells = vec![
+            Cell::Dim(format!("{}", i + 1)),
+            if tracked { Cell::Chip(chip, row.color) } else { Cell::Plain(chip) },
+        ];
+        if style.with_name {
+            cells.push(Cell::Dim(fmt::clean_text(&m.name)));
+        }
+        cells.push(match m.current_price {
+            Some(p) => Cell::Bold(fmt::money_with(p, &snap.currency, decimals)),
+            None => Cell::Dim("·".into()),
+        });
+        cells.push(match m.market_cap {
+            Some(c) => Cell::Plain(fmt::compact(c, &snap.currency)),
+            None => Cell::Dim("·".into()),
+        });
+        cells.extend(changes.iter().map(|c| delta_cell(row.change(c))));
+        rows.push(cells);
+    }
+    let width = rows.first().map_or(0, |r| r.len());
+    Section {
+        header,
+        align: vec![None; width],
+        rows,
+        tail_header: Vec::new(),
+        tail_align: Vec::new(),
+        tail_rows: Vec::new(),
+        rule: None,
+    }
+}
+
 /// One row per holding, then the group's totals row. `None` when nothing is
 /// held, or when no held coin has a row to take its price from.
 fn holdings_section(
@@ -445,6 +506,21 @@ fn build(
     trend_cells: usize,
 ) -> (Vec<Column>, Vec<Section>) {
     let changes = cfg.change_columns();
+    // The market list is a different shape: a rank in front, a capitalisation
+    // after the price, and no group that could hold an address.
+    if snap.view == View::Top {
+        let changes = cfg.market_columns();
+        let decimals =
+            fmt::column_decimals(snap.rows.iter().filter_map(|r| r.market.current_price));
+        let mut columns = vec![Column { align: Align::Right }, Column { align: Align::Left }];
+        if style.with_name {
+            columns.push(Column { align: Align::Left });
+        }
+        columns.push(Column { align: Align::Right });
+        columns.push(Column { align: Align::Right });
+        columns.extend(changes.iter().map(|_| Column { align: Align::Right }));
+        return (columns, vec![top_section(snap, cfg, style, decimals)]);
+    }
     let holdings = holdings_of(snap, style.with_addresses);
     // The second column holds a coin's name among the coins and the wallet's
     // label among the addresses, so it exists if either wants it.
