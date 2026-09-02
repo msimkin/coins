@@ -15,6 +15,10 @@ enum Align {
     Right,
 }
 
+/// The gap between one column and the next. Shared, because the rule under a
+/// totals row has to cross exactly the gaps the columns leave.
+const GAP: usize = 2;
+
 #[derive(Debug, Clone)]
 enum Cell {
     Plain(String),
@@ -63,6 +67,15 @@ struct Column {
 /// own: a plot for the coins, an amount and an address for the holdings. Those
 /// are different data, so forcing them into one shared column only produced a
 /// hole in whichever group was not using it.
+/// A hairline over the columns a totals row adds up, drawn before `before_row`
+/// and starting at `from_column` — so it covers the money and the changes, and
+/// stops before the columns that are not summed.
+#[derive(Clone, Copy)]
+struct Rule {
+    before_row: usize,
+    from_column: usize,
+}
+
 struct Section {
     /// Labels for the shared columns.
     header: Vec<String>,
@@ -74,6 +87,8 @@ struct Section {
     tail_align: Vec<Align>,
     /// One entry per row, each the same length as `tail_header`.
     tail_rows: Vec<Vec<Cell>>,
+    /// Set only where a row sums the rows above it.
+    rule: Option<Rule>,
 }
 
 /// Narrowest plot worth drawing, and the point past which a wider one stops
@@ -107,7 +122,7 @@ pub fn table(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> Rend
                 // left on *their* line — the address columns no longer compete
                 // for the same space.
                 let plot = if cfg.inline_plot && snap.show_coins {
-                    width.saturating_sub(m.coins + 2).min(MAX_PLOT)
+                    width.saturating_sub(m.coins + GAP).min(MAX_PLOT)
                 } else {
                     0
                 };
@@ -146,14 +161,14 @@ struct Measured {
 fn measure(snap: &Snapshot, cfg: &Config, style: Style) -> Measured {
     let (columns, sections) = build(snap, cfg, style, 0);
     let shared = widths(&columns, &sections);
-    let prefix: usize = shared.iter().sum::<usize>() + 2 * shared.len().saturating_sub(1);
+    let prefix: usize = shared.iter().sum::<usize>() + GAP * shared.len().saturating_sub(1);
     let mut widest = 0;
     let mut coins = 0;
     for (i, section) in sections.iter().enumerate() {
         let tail = tail_widths(section);
         let mut total = prefix;
         for w in &tail {
-            total += 2 + w;
+            total += GAP + w;
         }
         if i == 0 {
             coins = total;
@@ -277,6 +292,8 @@ fn coins_section(
         tail_header,
         tail_align,
         tail_rows,
+        // Nothing in the coins group sums the rows above it.
+        rule: None,
     }
 }
 
@@ -343,11 +360,19 @@ fn holdings_section(
     // would need its own header to label the change columns, and a row sitting
     // directly under the ones it adds up is already labelled by them. A single
     // holding is its own total, so it gets no summary.
+    let mut rule = None;
     if rows.len() > 1 {
         let total: f64 = holdings
             .iter()
             .map(|(_, id, amount)| amount * price_of(id))
             .sum();
+        // Set here rather than after the fact, so the rule cannot outlive the
+        // row it belongs to: the money column is where the total's own figure
+        // goes, two columns in when the labels have a column of their own.
+        rule = Some(Rule {
+            before_row: rows.len(),
+            from_column: if col_two { 2 } else { 1 },
+        });
         let mut cells = vec![Cell::Plain(String::new())];
         if col_two {
             // The coin column stays empty — a total belongs to no single coin —
@@ -372,6 +397,7 @@ fn holdings_section(
         tail_header: vec!["AMOUNT".into(), "ADDRESS".into()],
         tail_align: vec![Align::Right, Align::Left],
         tail_rows,
+        rule,
     })
 }
 
@@ -499,6 +525,15 @@ fn widths(columns: &[Column], sections: &[Section]) -> Vec<usize> {
         .collect()
 }
 
+/// Where a rule under the summed columns starts, and how far it runs: from the
+/// left edge of `from` to the right edge of the last shared column, crossing the
+/// two-space gaps between them on the way.
+fn rule_span(shared: &[usize], from: usize) -> (usize, usize) {
+    let start = shared[..from].iter().sum::<usize>() + GAP * from;
+    let len = shared[from..].iter().sum::<usize>() + GAP * (shared.len() - from - 1);
+    (start, len)
+}
+
 fn emit(
     columns: &[Column],
     sections: &[Section],
@@ -515,23 +550,33 @@ fn emit(
         let mut header = SLine::new();
         for (i, col) in columns.iter().enumerate() {
             if i > 0 {
-                header.spaces(2);
+                header.spaces(GAP);
             }
             let text = section.header.get(i).cloned().unwrap_or_default();
             let align = section.align.get(i).copied().flatten().unwrap_or(col.align);
             pad_cell(&mut header, &text, theme.dim(&text), shared[i], align);
         }
         for (i, text) in section.tail_header.iter().enumerate() {
-            header.spaces(2);
+            header.spaces(GAP);
             pad_cell(&mut header, text, theme.dim(text), tail[i], section.tail_align[i]);
         }
         out.push(header.finish().trim_end().to_string());
 
         for (r, row) in section.rows.iter().enumerate() {
+            // A hairline over the figures this row adds up, in the grey the
+            // header rule and the plot rails use: structure, not a divider.
+            if let Some(rule) = section.rule.filter(|x| x.before_row == r) {
+                let (start, len) = rule_span(shared, rule.from_column);
+                let bar = "─".repeat(len);
+                let mut line = SLine::new();
+                line.spaces(start);
+                line.styled(&bar, theme.paint(&bar, theme.axis()));
+                out.push(line.finish());
+            }
             let mut line = SLine::new();
             for (i, cell) in row.iter().enumerate() {
                 if i > 0 {
-                    line.spaces(2);
+                    line.spaces(GAP);
                 }
                 let align = section.align.get(i).copied().flatten().unwrap_or(columns[i].align);
                 let text = cell.text();
@@ -539,7 +584,7 @@ fn emit(
             }
             if let Some(cells) = section.tail_rows.get(r) {
                 for (i, cell) in cells.iter().enumerate() {
-                    line.spaces(2);
+                    line.spaces(GAP);
                     let text = cell.text();
                     pad_cell(&mut line, &text, cell.paint(theme), tail[i], section.tail_align[i]);
                 }
@@ -559,5 +604,29 @@ fn pad_cell(line: &mut SLine, text: &str, painted: String, width: usize, align: 
     line.styled(text, painted);
     if align == Align::Left {
         line.spaces(pad);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rule_covers_the_summed_columns_and_no_others() {
+        // chip, label, money, and three change columns.
+        let shared = [6, 11, 11, 6, 6, 7];
+        let (start, len) = rule_span(&shared, 2);
+        // It begins where the money column begins: two columns and their gaps in.
+        assert_eq!(start, 6 + 11 + GAP * 2);
+        // And ends with the last change column, gaps between them included.
+        assert_eq!(start + len, shared.iter().sum::<usize>() + GAP * (shared.len() - 1));
+    }
+
+    #[test]
+    fn a_table_without_a_name_column_starts_the_rule_one_column_earlier() {
+        let shared = [6, 11, 6, 6];
+        let (start, len) = rule_span(&shared, 1);
+        assert_eq!(start, 6 + GAP);
+        assert_eq!(start + len, shared.iter().sum::<usize>() + GAP * (shared.len() - 1));
     }
 }
