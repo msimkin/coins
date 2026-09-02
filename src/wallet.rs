@@ -26,6 +26,12 @@ pub const SOLANA_RPCS: &[&str] = &[
     "https://solana-rpc.publicnode.com",
 ];
 
+/// Solana's stake program, and the shape of one of its accounts: 200 bytes, with
+/// the withdraw authority — whoever can take the SOL back out — 44 bytes in.
+const STAKE_PROGRAM: &str = "Stake11111111111111111111111111111111111111";
+const STAKE_ACCOUNT_LEN: u64 = 200;
+const STAKE_WITHDRAWER_AT: u64 = 44;
+
 /// `balanceOf(address)` — the first four bytes of its keccak-256 hash.
 const BALANCE_OF: &str = "0x70a08231";
 /// `decimals()`, likewise. Asking the contract is free and authoritative.
@@ -125,6 +131,45 @@ impl Rpc {
                 Ok(lamports / 1e9)
             }
         }
+    }
+
+    /// SOL held in stake accounts this address can withdraw from.
+    ///
+    /// `getBalance` counts only what is liquid, and staking is the ordinary
+    /// thing to do with SOL — so without this a staker's holdings read low,
+    /// quietly, which is the worst way for a number to be wrong.
+    ///
+    /// `dataSlice` asks for none of the account data: only the lamports each one
+    /// holds are wanted, and endpoints are readier to answer that. Not all of
+    /// them will answer at all — indexed queries are the first thing a free
+    /// endpoint turns off — but the caller tries each in turn.
+    pub fn staked_balance(&self, address: &str) -> Result<f64> {
+        if self.chain != Chain::Solana {
+            return Ok(0.0);
+        }
+        let accounts = self.call(
+            "getProgramAccounts",
+            serde_json::json!([
+                STAKE_PROGRAM,
+                {
+                    "encoding": "base64",
+                    "dataSlice": { "offset": 0, "length": 0 },
+                    "filters": [
+                        { "dataSize": STAKE_ACCOUNT_LEN },
+                        { "memcmp": { "offset": STAKE_WITHDRAWER_AT, "bytes": address } }
+                    ]
+                }
+            ]),
+        )?;
+        let lamports: f64 = accounts
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|a| a.get("account")?.get("lamports")?.as_f64())
+                    .sum()
+            })
+            .unwrap_or(0.0);
+        Ok(lamports / 1e9)
     }
 
     /// The token's own `decimals()`. Defaults to 18 for a contract that does

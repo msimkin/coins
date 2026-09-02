@@ -638,6 +638,21 @@ impl Fetcher {
                     // only "via <endpoint>", which says nothing on its own.
                     Err(e) => warnings.push(format!("{label}: {e:#}")),
                 }
+                // Staked SOL sits in accounts of its own, which `getBalance`
+                // does not count. Left out, an address that stakes reads low
+                // and says nothing about it.
+                if chain == Chain::Solana {
+                    let key = format!("stake-{addr}");
+                    match self.cached_balance(&key, || rpc.staked_balance(&wallet.address)) {
+                        Ok(v) if v > 0.0 => {
+                            *amounts.entry(native.to_string()).or_insert(0.0) += v
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warnings.push(format!("{label}: staked SOL not counted — {e:#}"))
+                        }
+                    }
+                }
             }
 
             let map = tokens.iter().find(|(c, _)| *c == chain).map(|(_, m)| m);
