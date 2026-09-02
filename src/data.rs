@@ -482,9 +482,7 @@ impl Fetcher {
         if markets.is_empty() {
             match status {
                 Status::RateLimited => bail!(
-                    "CoinGecko is rate-limiting this machine and nothing is cached yet\n\
-                     the keyless allowance is 5-15 requests a minute — wait a moment, or put a\n\
-                     free demo key in `api_key` (`coins config --edit`) for 100 a minute"
+                    "CoinGecko is rate-limiting this machine and nothing is cached yet\n{RATE_LIMIT_HINT}"
                 ),
                 _ => bail!(
                     "could not reach CoinGecko and no cached prices are available\n\
@@ -516,7 +514,7 @@ impl Fetcher {
 
         let mut rows = build_rows(&display, &markets, &amounts, focus_id.is_some());
         if rows.is_empty() {
-            bail!("nothing to show — add a coin with `coins add bitcoin`");
+            bail!("{}", no_rows_message(&display, status));
         }
 
         // `balance = "addresses"` drops the coin table from this view, but only
@@ -827,6 +825,37 @@ pub const COMMON_CURRENCIES: &[&str] = &[
 ];
 
 /// One row per coin to display, coloured by its place in that order.
+/// The keyless allowance and the way out of it. One wording, wherever a request
+/// could not be made, because the answer is the same every time.
+const RATE_LIMIT_HINT: &str =
+    "the keyless allowance is 5-15 requests a minute — wait a moment, or put a\n\
+     free demo key in `api_key` (`coins config --edit`) for 100 a minute";
+
+/// Why a screen has no rows on it.
+///
+/// Asking for a coin whose price did not arrive is not the same as tracking
+/// nothing, and telling someone to add a coin they have just added is worse than
+/// saying nothing at all. The status knows which happened, so it says so.
+fn no_rows_message(display: &[String], status: Status) -> String {
+    if display.is_empty() {
+        return "nothing tracked yet — add a coin with `coins add bitcoin`".into();
+    }
+    let names = match display {
+        [one] => format!("{one:?}"),
+        many => many.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", "),
+    };
+    match status {
+        Status::RateLimited => format!(
+            "no price for {names} yet — CoinGecko is rate-limiting this machine\n{RATE_LIMIT_HINT}"
+        ),
+        Status::Offline => format!(
+            "no price for {names} yet — could not reach CoinGecko\ncheck your connection, then try again"
+        ),
+        // The prices did arrive, and this coin was not among them.
+        _ => format!("coingecko has no market data for {names}"),
+    }
+}
+
 /// Percentage change across the last `days` of a chart. The window is measured
 /// back from the chart's own last point rather than from the clock, because the
 /// history lags the live quote by up to an hour.
@@ -957,6 +986,30 @@ fn plan_chart(view: View, focused: bool, count: usize) -> (ChartPlan, Vec<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_screen_says_which_thing_went_wrong() {
+        let one = vec!["bitcoin".to_string()];
+        // The case that started this: rate-limited, asking for a coin whose
+        // price is not in the cache. Telling someone to add a coin they have
+        // just added is worse than saying nothing.
+        let limited = no_rows_message(&one, Status::RateLimited);
+        assert!(limited.contains("rate-limiting"), "{limited}");
+        assert!(limited.contains("bitcoin"), "{limited}");
+        assert!(!limited.contains("coins add"), "{limited}");
+
+        let offline = no_rows_message(&one, Status::Offline);
+        assert!(offline.contains("could not reach"), "{offline}");
+        assert!(!offline.contains("coins add"), "{offline}");
+
+        // Prices did arrive and this coin was not among them: a name to fix.
+        let fresh = no_rows_message(&one, Status::Fresh);
+        assert!(fresh.contains("no market data"), "{fresh}");
+
+        // Nothing asked for at all is the only case that asks for a coin.
+        let empty = no_rows_message(&[], Status::Fresh);
+        assert!(empty.contains("coins add bitcoin"), "{empty}");
+    }
 
     #[test]
     fn a_month_change_is_measured_from_the_chart_end() {
