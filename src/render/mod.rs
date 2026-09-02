@@ -217,12 +217,10 @@ fn facet_charts(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> V
     if charted.is_empty() {
         return Vec::new();
     }
-    let columns = if width >= 120 { 3 } else if width >= 74 { 2 } else { 1 };
     let gap = 3usize;
-    let col_w = (width - gap * (columns - 1)) / columns;
-    if col_w < 26 {
+    let Some((columns, col_w)) = grid(charted.len(), width, gap) else {
         return Vec::new();
-    }
+    };
     // Side by side, facets can afford height; stacked, they must not run off
     // the screen, so each gets less.
     let height = if columns > 1 {
@@ -255,6 +253,22 @@ fn facet_charts(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> V
     out
 }
 
+
+/// How many facets go side by side, and how wide each one is.
+///
+/// The rows are balanced rather than filled: four charts in a terminal that fits
+/// three go two and two, not three and one. So the widest grid that fits sets the
+/// row count, and the columns are then spread evenly over that many rows.
+fn grid(count: usize, width: usize, gap: usize) -> Option<(usize, usize)> {
+    const MIN_W: usize = 26;
+    let fits = (width + gap) / (MIN_W + gap);
+    let widest = fits.min(count).max(1);
+    let rows = count.div_ceil(widest);
+    let columns = count.div_ceil(rows);
+    let col_w = (width - gap * (columns - 1)) / columns;
+    (col_w >= MIN_W).then_some((columns, col_w))
+}
+
 fn facet(
     row: &Row,
     snap: &Snapshot,
@@ -265,19 +279,56 @@ fn facet(
 ) -> Vec<String> {
     // Over the plot area rather than over the axis numbers — in a grid this
     // reads better, because the eye compares curves across panels.
+    //
+    // A title wider than its facet would push every column to its right out of
+    // line, so it gives things up in order of what the reader can do without:
+    // the period first, then the price, then the change. The name of the coin
+    // always stays.
+    let price = row.market.current_price.map(|p| fmt::money(p, &snap.currency));
+    let change = row.series.as_deref().and_then(change_over);
+    let period = format!(" ({})", snap.range.short().to_ascii_lowercase());
+    let plain = |with_period: bool, with_price: bool, with_change: bool| {
+        let mut n = gutter + 1 + 2 + row.market.ticker().chars().count();
+        if with_price {
+            n += 2 + price.as_deref().map_or(0, |t| t.chars().count());
+        }
+        if with_change && change.is_some() {
+            n += 2 + fmt::percent(change.unwrap()).chars().count();
+            if with_period {
+                n += period.chars().count();
+            }
+        }
+        n
+    };
+    let (with_period, with_price, with_change) = [
+        (true, true, true),
+        (false, true, true),
+        (false, false, true),
+        (false, false, false),
+    ]
+    .into_iter()
+    .find(|(a, b, c)| plain(*a, *b, *c) <= width)
+    .unwrap_or((false, false, false));
+
     let mut title = SLine::new();
     title.spaces(gutter + 1);
     let chip = format!("● {}", row.market.ticker());
     title.styled(&chip, theme.paint(&chip, theme.series(row.color)));
-    title.spaces(2);
-    if let Some(p) = row.market.current_price {
-        let text = fmt::money(p, &snap.currency);
-        title.styled(&text, theme.bold(&text));
+    if with_price {
+        if let Some(text) = &price {
+            title.spaces(2);
+            title.styled(text, theme.bold(text));
+        }
     }
-    if let Some(v) = row.series.as_deref().and_then(change_over) {
-        title.spaces(2);
-        let text = fmt::percent(v);
-        title.styled(&text, theme.delta(&text, v));
+    if with_change {
+        if let Some(v) = change {
+            title.spaces(2);
+            let text = fmt::percent(v);
+            title.styled(&text, theme.delta(&text, v));
+            if with_period {
+                title.styled(&period, theme.dim(&period));
+            }
+        }
     }
     // A blank line between the title and its plot: flush against the axis the
     // two read as one block, and the title stops looking like a label.
@@ -369,5 +420,35 @@ fn allocation_bar(
         vec![joined.finish()]
     } else {
         vec![line.finish(), labels.finish().trim_start().to_string()]
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::grid;
+
+    #[test]
+    fn rows_are_balanced_rather_than_filled() {
+        // A terminal that fits three columns, given four charts, uses two and two.
+        assert_eq!(grid(4, 110, 3).map(|(c, _)| c), Some(2));
+        // Given five, it needs two rows either way, so it fills three then two.
+        assert_eq!(grid(5, 110, 3).map(|(c, _)| c), Some(3));
+        // Wide enough for all four at once, they go in one row.
+        assert_eq!(grid(4, 160, 3).map(|(c, _)| c), Some(4));
+        // Three charts, room for two: two and one.
+        assert_eq!(grid(3, 80, 3).map(|(c, _)| c), Some(2));
+    }
+
+    #[test]
+    fn a_narrow_terminal_stacks_then_gives_up() {
+        assert_eq!(grid(3, 40, 3).map(|(c, _)| c), Some(1));
+        assert_eq!(grid(3, 20, 3), None, "no chart fits, so none is drawn");
+    }
+
+    #[test]
+    fn every_column_gets_the_same_width() {
+        let (columns, w) = grid(4, 160, 3).unwrap();
+        assert_eq!(columns, 4);
+        assert!(w * columns + 3 * (columns - 1) <= 160);
     }
 }
