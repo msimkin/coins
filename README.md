@@ -1,24 +1,23 @@
-<div align="right"><img src="docs/icon.png" width="64" alt=""></div>
+<img src="docs/icon.png" width="52" align="right" alt="">
 
 # coins
 
 [![CI](https://github.com/msimkin/coins/actions/workflows/ci.yml/badge.svg)](https://github.com/msimkin/coins/actions/workflows/ci.yml)
 
-Cryptocurrency prices, charts and holdings in your terminal.
+Cryptocurrency prices, charts and holdings in your terminal. Prices come from
+[CoinGecko](https://docs.coingecko.com), quoted directly in your own currency.
 
-![Three coins with their price and the change over 1h, 24h, 30 days, 6 months and a year](docs/market.png)
+<img src="docs/market.png" width="568" alt="Three coins with their price and the change over 1h, 24h, 30 days, 6 months and a year">
 
-One row per coin: the price, then a change column for every period you name. Prices
-come from [CoinGecko](https://docs.coingecko.com), quoted directly in your own
-currency.
+One row per coin: the price, then a change column for every period you name.
 
 `coins plot` draws the charts, as many to a row as the terminal fits:
 
-![Four charts in a two-by-two grid: BTC, ETH, SOL and STRK over a month](docs/plot.png)
+<img src="docs/plot.png" width="701" alt="Four charts in a two-by-two grid: BTC, ETH, SOL and STRK over a month">
 
 `coins eth` draws one of them alone:
 
-![One full-width chart of ETH over a month](docs/eth.png)
+<img src="docs/eth.png" width="631" alt="One full-width chart of ETH over a month">
 
 Curves are braille dots, 2×4 to a character cell, so they stay smooth at any width.
 
@@ -105,7 +104,7 @@ chain follows from the address — `0x` and 40 hex digits is Ethereum, 43–44 b
 characters is Solana — and one address holds the chain's own coin plus any token you
 track, so the group has a row per holding rather than per address.
 
-![The balance view: coins, then addresses with amounts, a total and an allocation bar](docs/balance.png)
+<img src="docs/balance.png" width="631" alt="The balance view: coins, then addresses with amounts, a total and an allocation bar">
 
 The addresses and amounts above are made up.
 
