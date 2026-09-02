@@ -144,23 +144,25 @@ impl Api {
             .map_err(|e| anyhow!(e).context(format!("parsing the response to {path}")))
     }
 
-    /// Everything the table needs, for every coin, in one request. The 7-day
-    /// sparkline rides along free of charge.
+    /// Everything the table needs, for every coin, in one request.
     pub fn markets(
         &self,
         ids: &[String],
         currency: &str,
         changes: &[&str],
+        sparkline: bool,
     ) -> Result<Vec<Market>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let ids = ids.join(",");
         let changes = changes.join(",");
+        // The 7-day series is three quarters of the response by size, so it is
+        // asked for only when something on the screen draws it.
         let mut query = vec![
             ("vs_currency", currency),
             ("ids", ids.as_str()),
-            ("sparkline", "true"),
+            ("sparkline", if sparkline { "true" } else { "false" }),
             ("per_page", "250"),
             ("precision", "full"),
         ];

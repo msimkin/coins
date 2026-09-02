@@ -132,15 +132,18 @@ fn hero(row: &Row, snap: &Snapshot, theme: &Theme) -> Vec<String> {
     line.styled(&price, theme.bold(&price));
     line.spaces(3);
 
-    let range_change = row
-        .series
-        .as_deref()
-        .and_then(change_over)
-        .or_else(|| row.market.change("24h"));
-    if let Some(v) = range_change {
+    // The change over the period, and the period it is over. Without a chart
+    // there is no figure for the range, and the day's change stands in — under
+    // its own name, since a 24-hour move labelled `(6m)` is simply untrue.
+    let (change, period) = match row.series.as_deref().and_then(change_over) {
+        Some(v) if row.week_fallback => (Some(v), "7D"),
+        Some(v) => (Some(v), snap.range.short()),
+        None => (row.market.change("24h"), "24H"),
+    };
+    if let Some(v) = change {
         let text = fmt::percent(v);
         line.styled(&text, theme.delta(&text, v));
-        let suffix = format!(" ({})", snap.range.short().to_ascii_lowercase());
+        let suffix = format!(" ({})", period.to_ascii_lowercase());
         line.styled(&suffix, theme.dim(&suffix));
     }
 
@@ -368,7 +371,10 @@ fn facet(
     // does not reads as an accident rather than as a fit.
     let price = row.market.current_price.map(|p| fmt::money(p, &snap.currency));
     let change = row.series.as_deref().and_then(change_over);
-    let period = format!(" ({})", snap.range.short().to_ascii_lowercase());
+    let period = format!(
+        " ({})",
+        if row.week_fallback { "7D" } else { snap.range.short() }.to_ascii_lowercase()
+    );
     let (with_period, with_price, with_change) = parts;
 
     let mut title = SLine::new();

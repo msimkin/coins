@@ -25,6 +25,13 @@ const MARKETS_TTL: Duration = Duration::from_secs(60);
 /// them current, so this can be generous.
 const WALLET_TTL: Duration = Duration::from_secs(5 * 60);
 const META_TTL: Duration = Duration::from_secs(30 * 86_400);
+/// How many of the built-in popular coins ride along with every prices request,
+/// history and all, so that any of them can be shown and plotted without one.
+/// Fifty is the trade: each coin's week of history is about 3 KB, so fifty cost
+/// 200 KB against the 13 KB a tracked-coins-only request took. The list itself
+/// holds 250, and the rest are one request away.
+const POPULAR_PRICED: usize = 50;
+
 /// Beyond this many charted coins we stop fetching history — each one is a
 /// request, and the keyless allowance is 5-15 per minute.
 const MAX_FACETS: usize = 8;
@@ -43,6 +50,10 @@ pub struct Row {
     /// Changes worked out from a chart rather than supplied with the price —
     /// the month columns, keyed by column name.
     pub changes: BTreeMap<String, f64>,
+    /// The series is the free week of history that came with the price, and the
+    /// configured range is longer than that. Whatever names the period has to
+    /// say `7d`, or it is describing history the row does not have.
+    pub week_fallback: bool,
 }
 
 impl Row {
@@ -109,7 +120,8 @@ impl Snapshot {
     /// trend column can be labelled with that range rather than the free
     /// 7-day sparkline it otherwise falls back to.
     pub fn trend_is_range(&self) -> bool {
-        !self.rows.is_empty() && self.rows.iter().all(|r| r.series.is_some())
+        !self.rows.is_empty()
+            && self.rows.iter().all(|r| r.series.is_some() && !r.week_fallback)
     }
 }
 
@@ -268,14 +280,34 @@ impl Fetcher {
         }
     }
 
+    /// The coins to ask for: the ones this screen needs, and the most valuable
+    /// hundred alongside them.
+    ///
+    /// They cost nothing in requests — one call carries all of them — and they
+    /// are why `coins btc` answers at once for a coin nobody tracks, and keeps
+    /// answering while the API is rate-limiting or unreachable. The sparklines
+    /// are what makes such a response big (3 KB a coin, against 1 KB for the
+    /// prices), so they are asked for only when a screen can show one.
+    fn fetch_ids(&self, needed: &[String]) -> Vec<String> {
+        let mut ids = needed.to_vec();
+        for (id, _, _) in coins::POPULAR.iter().take(POPULAR_PRICED) {
+            if !ids.iter().any(|x| x == id) {
+                ids.push((*id).to_string());
+            }
+        }
+        ids
+    }
+
     fn markets_key(&self) -> String {
         format!("markets-{}-{}", self.cfg.currency, self.cfg.market_columns().join("_"))
     }
 
-    fn markets(&self, ids: &[String]) -> (Vec<Market>, Duration, Status) {
+    /// `needed` is what the screen must have; the request asks for more.
+    fn markets(&self, needed: &[String]) -> (Vec<Market>, Duration, Status) {
         let key = self.markets_key();
         let changes = self.cfg.market_columns();
-        let fetch = || self.api.markets(ids, &self.cfg.currency, &changes);
+        let asked = self.fetch_ids(needed);
+        let fetch = || self.api.markets(&asked, &self.cfg.currency, &changes, true);
 
         let cached = if self.force { None } else { self.cache.get::<Vec<Market>>(&key) };
         // A cached set that predates a config change is short of the coin just
@@ -285,7 +317,7 @@ impl Fetcher {
         // every price off the screen — including the ones already in hand.
         let complete = cached
             .as_ref()
-            .is_some_and(|h| ids.iter().all(|id| h.value.iter().any(|m| &m.id == id)));
+            .is_some_and(|h| needed.iter().all(|id| h.value.iter().any(|m| &m.id == id)));
 
         if let Some(hit) = cached {
             if complete && hit.age < MARKETS_TTL {
@@ -348,9 +380,9 @@ impl Fetcher {
     /// The screen `view` asked for, narrowed to one coin when `focus` is set.
     /// Warnings about the prices themselves: coins the API knows nothing about,
     /// and coins too cheap to render at the configured ceiling.
-    fn price_warnings(&self, ids: &[String], markets: &[Market], status: Status) -> Vec<String> {
+    fn price_warnings(&self, needed: &[String], markets: &[Market], status: Status) -> Vec<String> {
         let mut out = Vec::new();
-        for id in ids {
+        for id in needed {
             if !markets.iter().any(|m| &m.id == id) {
                 // Whether the coin has no data or merely no *cached* data is the
                 // difference between a name to fix and a wait.
@@ -366,8 +398,10 @@ impl Fetcher {
             }
         }
         // A price below the decimal ceiling prints as zero. Better to say so
-        // than to show someone a coin apparently worth nothing.
-        for m in markets {
+        // than to show someone a coin apparently worth nothing. Only for the
+        // coins this screen shows: most of the hundred fetched alongside them
+        // are worth a fraction of a cent, and none of them is on the screen.
+        for m in markets.iter().filter(|m| needed.iter().any(|id| id == &m.id)) {
             if let Some(p) = m.current_price {
                 if crate::render::fmt::rounds_to_zero(p, self.cfg.max_decimals.max(2)) {
                     out.push(format!(
@@ -433,6 +467,14 @@ impl Fetcher {
             }
             if want.contains(&i) {
                 row.series = self.series(&row.market.id);
+            }
+            // No chart for the range — a coin nobody tracks, or a request that
+            // could not be made. The week that came with the price is still a
+            // curve, and a curve is what was asked for; the label says which
+            // week it is rather than claiming the range.
+            if row.series.is_none() && want.contains(&i) {
+                row.series = sparkline_series(&row.market);
+                row.week_fallback = row.series.is_some() && self.cfg.range != Range::W1;
             }
         }
         // History lags the live quote by up to an hour, which would otherwise
@@ -762,7 +804,7 @@ impl Fetcher {
     pub fn warm(&self) -> Result<()> {
         let ids = self.cfg.quoted_coins();
         let changes = self.cfg.market_columns();
-        let markets = self.api.markets(&ids, &self.cfg.currency, &changes)?;
+        let markets = self.api.markets(&self.fetch_ids(&ids), &self.cfg.currency, &changes, true)?;
         self.cache.put(&self.markets_key(), &markets);
         // Balances too, so a run with wallets doesn't block on the chain.
         if !self.cfg.wallets.is_empty() {
@@ -891,6 +933,7 @@ fn build_rows(
                 series: None,
                 amount: amounts.get(id).copied().unwrap_or(0.0),
                 changes: BTreeMap::new(),
+                week_fallback: false,
             })
         })
         .collect()

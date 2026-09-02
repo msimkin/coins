@@ -129,6 +129,14 @@ every price, every change column and a week of history together. Other ranges ne
 chart per coin, as do the `3m` and `6m` columns — one chart serves both, since 180
 days of history contains the last 90.
 
+That one request also carries **the fifty largest coins**, a week of history each,
+not just the coins you track. So `coins doge` answers at once and draws a chart for
+a coin you have never added, and keeps doing both while the API is rate-limiting or
+unreachable. No extra request: about 200 KB in place of 13, since a week of history
+is roughly 3 KB a coin. A chart over a longer range still costs one request for the
+coin you asked for — and when it cannot be made, the week stands in and the label
+says `7d` rather than claiming the range.
+
 Charts are cached in `~/.cache/coins` for five minutes to a day, depending on how
 fast the period moves. The top line always states the age of what you are looking at,
 and says `offline` or `rate-limited` when it could not refresh.
