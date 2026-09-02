@@ -170,6 +170,21 @@ impl Api {
         self.get("/coins/markets", &query)
     }
 
+    /// The most valuable coins, for regenerating the built-in list. No ids: the
+    /// point is to find out which coins are worth carrying.
+    pub fn top_markets(&self, currency: &str, count: usize) -> Result<Vec<Market>> {
+        let per_page = count.to_string();
+        self.get(
+            "/coins/markets",
+            &[
+                ("vs_currency", currency),
+                ("order", "market_cap_desc"),
+                ("per_page", per_page.as_str()),
+                ("page", "1"),
+            ],
+        )
+    }
+
     pub fn market_chart(&self, id: &str, currency: &str, days: &str) -> Result<Series> {
         let chart: MarketChart = self.get(
             &format!("/coins/{id}/market_chart"),

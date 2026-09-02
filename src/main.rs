@@ -94,6 +94,9 @@ enum Command {
     /// Refresh the cache quietly; spawned in the background by a normal run
     #[command(name = "__warm", hide = true)]
     Warm,
+    /// Print `src/coins.rs`'s table from CoinGecko, to regenerate it
+    #[command(name = "__popular", hide = true)]
+    Popular,
 }
 
 fn main() {
@@ -148,6 +151,7 @@ fn run() -> Result<()> {
             let _ = fetcher.warm();
             Ok(())
         }
+        Some(Command::Popular) => popular(&cfg),
         Some(Command::Completions { .. }) => Ok(()), // handled above
         Some(Command::Plot { coin }) => {
             screen(cfg, &cli, &theme, View::Plot, coin.clone())
@@ -312,6 +316,29 @@ fn ticker_to_id(cfg: &Config, query: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `coins __popular`: the rows of `src/coins.rs`, freshly fetched.
+///
+/// Hidden, because it is for whoever maintains the tool rather than for whoever
+/// runs it. The names are stripped of zero-width and control characters, which
+/// count as one column and render as none — at least one listed coin ships them,
+/// and they silently misalign every column to their right.
+fn popular(cfg: &Config) -> Result<()> {
+    let api = coingecko::Api::new(&cfg.api_key);
+    let markets = api.top_markets("usd", 250)?;
+    println!("/// (id, symbol, name), most valuable first.");
+    println!("pub const POPULAR: &[(&str, &str, &str)] = &[");
+    for m in &markets {
+        println!(
+            "    ({:?}, {:?}, {:?}),",
+            m.id.trim(),
+            m.symbol.to_ascii_lowercase(),
+            render::fmt::clean_text(&m.name)
+        );
+    }
+    println!("];");
+    Ok(())
 }
 
 fn config_command(edit: bool, sync: bool) -> Result<()> {
