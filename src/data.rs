@@ -278,14 +278,20 @@ impl Fetcher {
         let fetch = || self.api.markets(ids, &self.cfg.currency, &changes);
 
         let cached = if self.force { None } else { self.cache.get::<Vec<Market>>(&key) };
-        // A cached row set that predates a config change can't be used as-is.
-        let cached = cached.filter(|h| ids.iter().all(|id| h.value.iter().any(|m| &m.id == id)));
+        // A cached set that predates a config change is short of the coin just
+        // added. It is still worth having: the coins it does carry are priced,
+        // and the missing one is named in a warning. Discarding it wholesale
+        // meant that adding a coin while offline, or while rate-limited, took
+        // every price off the screen — including the ones already in hand.
+        let complete = cached
+            .as_ref()
+            .is_some_and(|h| ids.iter().all(|id| h.value.iter().any(|m| &m.id == id)));
 
         if let Some(hit) = cached {
-            if hit.age < MARKETS_TTL {
+            if complete && hit.age < MARKETS_TTL {
                 return (hit.value, hit.age, Status::Fresh);
             }
-            if hit.age < WARM_WINDOW {
+            if complete && hit.age < WARM_WINDOW {
                 // Show what we have now; make the next run fresh.
                 self.cache.spawn_warm();
                 return (hit.value, hit.age, Status::Warming);
@@ -342,11 +348,21 @@ impl Fetcher {
     /// The screen `view` asked for, narrowed to one coin when `focus` is set.
     /// Warnings about the prices themselves: coins the API knows nothing about,
     /// and coins too cheap to render at the configured ceiling.
-    fn price_warnings(&self, ids: &[String], markets: &[Market]) -> Vec<String> {
+    fn price_warnings(&self, ids: &[String], markets: &[Market], status: Status) -> Vec<String> {
         let mut out = Vec::new();
         for id in ids {
             if !markets.iter().any(|m| &m.id == id) {
-                out.push(format!("coingecko has no market data for {id:?}"));
+                // Whether the coin has no data or merely no *cached* data is the
+                // difference between a name to fix and a wait.
+                out.push(match status {
+                    Status::Offline => {
+                        format!("no price for {id:?} yet — could not reach CoinGecko")
+                    }
+                    Status::RateLimited => {
+                        format!("no price for {id:?} yet — CoinGecko is rate-limiting this machine")
+                    }
+                    _ => format!("coingecko has no market data for {id:?}"),
+                });
             }
         }
         // A price below the decimal ceiling prints as zero. Better to say so
@@ -476,7 +492,7 @@ impl Fetcher {
                 ),
             }
         }
-        let mut warnings = self.price_warnings(&ids, &markets);
+        let mut warnings = self.price_warnings(&ids, &markets, status);
 
         // What each view is for: plain `price` shows exactly what you track,
         // predictably and without hinting at holdings; the holdings view adds
