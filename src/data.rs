@@ -1,0 +1,886 @@
+//! Assembles a renderable snapshot from the cache and, when it must, the network.
+//!
+//! The read path is what makes the common case feel instant: a fresh cache is
+//! rendered without a request; a merely warm one is rendered immediately and
+//! refreshed by a detached background process so the *next* run is fresh; only
+//! a cold or long-stale cache blocks on the network. Whatever happens, the
+//! header states the age of what you are looking at.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+
+use crate::cache::{Cache, WARM_WINDOW};
+use crate::coingecko::{Api, Market, SearchCoin, Series, is_rate_limit, sparkline_series};
+use crate::coins;
+use crate::config::{Chain, Config, Range};
+use crate::portfolio::{self, HoldingSource, Portfolio};
+use crate::wallet::Rpc;
+
+/// Prices are recomputed by CoinGecko every 60s on the public API, so a
+/// shorter TTL would only spend rate limit for nothing.
+const MARKETS_TTL: Duration = Duration::from_secs(60);
+/// Balances move far less often than prices, and the background warmer keeps
+/// them current, so this can be generous.
+const WALLET_TTL: Duration = Duration::from_secs(5 * 60);
+const META_TTL: Duration = Duration::from_secs(30 * 86_400);
+/// Beyond this many charted coins we stop fetching history — each one is a
+/// request, and the keyless allowance is 5-15 per minute.
+const MAX_FACETS: usize = 8;
+/// The list view wants history for every row at once. Past this, every row
+/// falls back to the free 7-day series rather than spending a request each.
+const MAX_INLINE_SERIES: usize = 10;
+
+#[derive(Debug, Clone)]
+pub struct Row {
+    pub market: Market,
+    /// Palette slot, fixed by the coin's position in the config.
+    pub color: usize,
+    pub series: Option<Series>,
+    /// Units held, from `[holdings]` and any wallets.
+    pub amount: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Fresh,
+    /// Served from cache; a background refresh was started.
+    Warming,
+    Offline,
+    RateLimited,
+}
+
+/// Which screen was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// `price` — the list, each row carrying its own small plot.
+    List,
+    /// `coins plot` — the big plots, in the configured form.
+    Plot,
+    /// `coins balance` — what each address holds, and what it is worth.
+    Balance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartPlan {
+    /// No big chart: the list view's plots live in the table.
+    Off,
+    /// One coin, in absolute currency.
+    Single,
+    /// One small chart per coin, each with its own axis.
+    Facets,
+}
+
+pub struct Snapshot {
+    pub rows: Vec<Row>,
+    pub currency: String,
+    pub range: Range,
+    pub plan: ChartPlan,
+    /// The list view shows the table; the plot views speak for themselves.
+    pub show_table: bool,
+    /// Whether the addresses group appears under the table.
+    pub show_addresses: bool,
+    /// Rows to chart, as indices into `rows`.
+    pub charted: Vec<usize>,
+    pub age: Duration,
+    pub status: Status,
+    pub portfolio: Option<Portfolio>,
+    pub warnings: Vec<String>,
+}
+
+impl Snapshot {
+    /// True when every charted row has history for the selected range, so the
+    /// trend column can be labelled with that range rather than the free
+    /// 7-day sparkline it otherwise falls back to.
+    pub fn trend_is_range(&self) -> bool {
+        !self.rows.is_empty() && self.rows.iter().all(|r| r.series.is_some())
+    }
+}
+
+pub struct Fetcher {
+    pub cfg: Config,
+    pub api: Api,
+    pub cache: Cache,
+    /// `--refresh`: ignore cached values.
+    pub force: bool,
+}
+
+impl Fetcher {
+    pub fn new(cfg: Config, force: bool) -> Result<Fetcher> {
+        let api = Api::new(&cfg.api_key);
+        let cache = Cache::new(crate::config::cache_home()?);
+        Ok(Fetcher { cfg, api, cache, force })
+    }
+
+    /// Checks the configured display currency against CoinGecko's list.
+    pub fn validate_currency(&self) -> Result<()> {
+        // The currencies people actually use are waved through, so the common
+        // case never spends a request on the supported-currency list.
+        if COMMON_CURRENCIES.contains(&self.cfg.currency.as_str()) {
+            return Ok(());
+        }
+        let list: Vec<String> = match self.cached_currencies() {
+            Some(l) => l,
+            // Without the list we can't judge; let the request speak instead.
+            None => return Ok(()),
+        };
+        if list.iter().any(|c| c == &self.cfg.currency) {
+            return Ok(());
+        }
+        let near: Vec<&String> = list
+            .iter()
+            .filter(|c| {
+                c.starts_with(self.cfg.currency.get(..1).unwrap_or("_"))
+                    || c.contains(&self.cfg.currency)
+            })
+            .take(8)
+            .collect();
+        let hint = if near.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — did you mean {}?",
+                near.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        };
+        bail!(
+            "{:?} is not a currency CoinGecko can quote{hint}\nedit `currency` with `coins config --edit`",
+            self.cfg.currency
+        );
+    }
+
+    fn cached_currencies(&self) -> Option<Vec<String>> {
+        if let Some(v) = self.cache.get_fresh::<Vec<String>>("supported-currencies", META_TTL) {
+            return Some(v);
+        }
+        let fetched = self.api.supported_currencies().ok()?;
+        self.cache.put("supported-currencies", &fetched);
+        Some(fetched)
+    }
+
+    /// Turns `btc`, `bitcoin` or `Bitcoin` into a coin id, preferring something
+    /// already tracked so the common case costs no request.
+    pub fn resolve_coin(&self, query: &str) -> Result<String> {
+        let q = query.trim().to_ascii_lowercase();
+        // An address here is a category error, not a misspelling.
+        if crate::config::is_wallet_address(query.trim()) {
+            bail!(
+                "{} is an address, and a plot is of a coin — try `coins balance` \
+                 to see what your addresses hold",
+                crate::wallet::short_address(query.trim())
+            );
+        }
+        if self.cfg.coins.contains(&q) {
+            return Ok(q);
+        }
+        // Match a tracked coin by ticker without a network round trip.
+        if let Some(m) = self
+            .cache
+            .get::<Vec<Market>>(&self.markets_key())
+            .map(|h| h.value)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|m| m.symbol.eq_ignore_ascii_case(&q) && self.cfg.coins.contains(&m.id))
+        {
+            return Ok(m.id);
+        }
+        match self.search_best(&q)? {
+            Match::One(c) => Ok(c.id),
+            Match::Many(cands) => bail!("{}", ambiguous_message(&q, &cands)),
+            Match::Unknown(near) => bail!("{}", no_match_message(&q, &near)),
+        }
+    }
+
+    /// `/search`, reduced to a decision — but the built-in list of popular
+    /// coins is consulted first, so the common case needs no network at all.
+    pub fn search_best(&self, query: &str) -> Result<Match> {
+        let q = query.trim().to_ascii_lowercase();
+        if let Some(c) = coins::resolve(&q) {
+            return Ok(Match::One(SearchCoin {
+                id: c.0.to_string(),
+                name: c.2.to_string(),
+                symbol: c.1.to_string(),
+                market_cap_rank: None,
+            }));
+        }
+        let key = format!("search-{q}");
+        let coins: Vec<SearchCoin> = match self.cache.get_fresh(&key, META_TTL) {
+            Some(v) => v,
+            None => {
+                let v = self.api.search(&q).with_context(|| {
+                    format!(
+                        "could not reach CoinGecko to look up {q:?}\n\
+                         it is not one of the {} popular coins built in, so a lookup is needed",
+                        coins::POPULAR.len()
+                    )
+                })?;
+                self.cache.put(&key, &v);
+                v
+            }
+        };
+        if coins.is_empty() {
+            return Ok(Match::Unknown(Vec::new()));
+        }
+        // An exact id is unambiguous by definition.
+        if let Some(c) = coins.iter().find(|c| c.id.eq_ignore_ascii_case(&q)) {
+            return Ok(Match::One(c.clone()));
+        }
+        let mut exact: Vec<SearchCoin> = coins
+            .iter()
+            .filter(|c| c.symbol.eq_ignore_ascii_case(&q) || c.name.eq_ignore_ascii_case(&q))
+            .cloned()
+            .collect();
+        // Search is fuzzy: "bitcon" comes back with a list of real coins, none
+        // of them what was meant. Never guess from those — suggest and stop.
+        if exact.is_empty() {
+            let mut near = coins.clone();
+            near.sort_by_key(|c| c.market_cap_rank.unwrap_or(u32::MAX));
+            return Ok(Match::Unknown(near.into_iter().take(5).collect()));
+        }
+        exact.sort_by_key(|c| c.market_cap_rank.unwrap_or(u32::MAX));
+        let best = exact[0].clone();
+        // A clear market-cap leader is the answer; a close field is a question.
+        let decisive = match (best.market_cap_rank, exact.get(1).and_then(|c| c.market_cap_rank)) {
+            (Some(a), Some(b)) => a * 4 < b.max(1),
+            (Some(_), None) => true,
+            _ => exact.len() == 1,
+        };
+        if decisive {
+            Ok(Match::One(best))
+        } else {
+            Ok(Match::Many(exact.into_iter().take(5).collect()))
+        }
+    }
+
+    fn markets_key(&self) -> String {
+        format!("markets-{}-{}", self.cfg.currency, self.cfg.change_columns().join("_"))
+    }
+
+    fn markets(&self, ids: &[String]) -> (Vec<Market>, Duration, Status) {
+        let key = self.markets_key();
+        let changes = self.cfg.change_columns();
+        let fetch = || self.api.markets(ids, &self.cfg.currency, &changes);
+
+        let cached = if self.force { None } else { self.cache.get::<Vec<Market>>(&key) };
+        // A cached row set that predates a config change can't be used as-is.
+        let cached = cached.filter(|h| ids.iter().all(|id| h.value.iter().any(|m| &m.id == id)));
+
+        if let Some(hit) = cached {
+            if hit.age < MARKETS_TTL {
+                return (hit.value, hit.age, Status::Fresh);
+            }
+            if hit.age < WARM_WINDOW {
+                // Show what we have now; make the next run fresh.
+                self.cache.spawn_warm();
+                return (hit.value, hit.age, Status::Warming);
+            }
+            return match fetch() {
+                Ok(v) => {
+                    self.cache.put(&key, &v);
+                    (v, Duration::ZERO, Status::Fresh)
+                }
+                Err(e) => {
+                    let status = if is_rate_limit(&e) { Status::RateLimited } else { Status::Offline };
+                    (hit.value, hit.age, status)
+                }
+            };
+        }
+        match fetch() {
+            Ok(v) => {
+                self.cache.put(&key, &v);
+                (v, Duration::ZERO, Status::Fresh)
+            }
+            Err(e) => {
+                // Which failure it was decides what the caller tells the user;
+                // "check your connection" is wrong advice for a rate limit.
+                let status = if is_rate_limit(&e) { Status::RateLimited } else { Status::Offline };
+                (Vec::new(), Duration::ZERO, status)
+            }
+        }
+    }
+
+    fn series(&self, id: &str) -> Option<Series> {
+        let key = format!("chart-{id}-{}-{}", self.cfg.currency, self.cfg.range.key());
+        let ttl = self.cfg.range.chart_ttl();
+        if !self.force {
+            if let Some(v) = self.cache.get_fresh::<Series>(&key, ttl) {
+                return Some(v);
+            }
+        }
+        match self.api.market_chart(id, &self.cfg.currency, self.cfg.range.days()) {
+            Ok(v) => {
+                self.cache.put(&key, &v);
+                Some(v)
+            }
+            // Fall back to any stale copy before giving up on the chart.
+            Err(_) => self.cache.get::<Series>(&key).map(|h| h.value),
+        }
+    }
+
+    /// The screen `view` asked for, narrowed to one coin when `focus` is set.
+    /// Warnings about the prices themselves: coins the API knows nothing about,
+    /// and coins too cheap to render at the configured ceiling.
+    fn price_warnings(&self, ids: &[String], markets: &[Market]) -> Vec<String> {
+        let mut out = Vec::new();
+        for id in ids {
+            if !markets.iter().any(|m| &m.id == id) {
+                out.push(format!("coingecko has no market data for {id:?}"));
+            }
+        }
+        // A price below the decimal ceiling prints as zero. Better to say so
+        // than to show someone a coin apparently worth nothing.
+        for m in markets {
+            if let Some(p) = m.current_price {
+                if crate::render::fmt::rounds_to_zero(p, self.cfg.max_decimals.max(2)) {
+                    out.push(format!(
+                        "{} is too small to show at max_decimals = {} — raise it to see the price",
+                        m.ticker(),
+                        self.cfg.max_decimals
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every balance held, per wallet and merged, with the dust removed.
+    ///
+    /// Airdrops and contract leftovers leave most real addresses holding a few
+    /// balances worth a fraction of a cent. Pruned here, once, so they reach
+    /// neither the rows, nor the allocation bar, nor the total.
+    fn holdings(
+        &self,
+        ids: &[String],
+        markets: &[Market],
+        warnings: &mut Vec<String>,
+    ) -> (Vec<WalletBalances>, BTreeMap<String, f64>) {
+        let mut per_wallet = if self.cfg.wallets.is_empty() {
+            Vec::new()
+        } else {
+            self.wallet_amounts(ids, warnings)
+        };
+        for wallet in &mut per_wallet {
+            wallet.amounts.retain(|id, amount| {
+                let price = markets
+                    .iter()
+                    .find(|m| &m.id == id)
+                    .and_then(|m| m.current_price)
+                    .unwrap_or(0.0);
+                let value = price * *amount;
+                value > 0.0 && !crate::render::fmt::rounds_to_zero(value, 2)
+            });
+        }
+        let mut merged: BTreeMap<String, f64> = BTreeMap::new();
+        for wallet in &per_wallet {
+            for (id, amount) in &wallet.amounts {
+                *merged.entry(id.clone()).or_insert(0.0) += *amount;
+            }
+        }
+        for (id, amount) in &self.cfg.holdings {
+            *merged.entry(id.clone()).or_insert(0.0) += *amount;
+        }
+        (per_wallet, merged)
+    }
+
+    /// Fills in the price history each row needs, and closes the gap between
+    /// that history and the live quote.
+    fn attach_series(&self, rows: &mut [Row], want: &[usize]) {
+        for (i, row) in rows.iter_mut().enumerate() {
+            // A 1-week chart is free: it rides along with the prices request.
+            if self.cfg.range == Range::W1 {
+                row.series = sparkline_series(&row.market);
+                if row.series.is_some() {
+                    continue;
+                }
+            }
+            if want.contains(&i) {
+                row.series = self.series(&row.market.id);
+            }
+        }
+        // History lags the live quote by up to an hour, which would otherwise
+        // put the period's low above the current price.
+        for row in rows.iter_mut() {
+            if let Some(series) = row.series.as_mut() {
+                append_quote(series, &row.market);
+            }
+        }
+    }
+
+    /// The screen `view` asked for, narrowed to one coin when `focus` is set.
+    pub fn snapshot(
+        &self,
+        focus: Option<&str>,
+        view: View,
+        inline_plots: bool,
+    ) -> Result<Snapshot> {
+        let focus_id = match focus {
+            Some(q) => Some(self.resolve_coin(q)?),
+            None => None,
+        };
+        let mut ids = self.cfg.quoted_coins();
+        if let Some(f) = &focus_id {
+            if !ids.contains(f) {
+                ids.push(f.clone());
+            }
+        }
+        let (markets, age, status) = self.markets(&ids);
+        if markets.is_empty() {
+            match status {
+                Status::RateLimited => bail!(
+                    "CoinGecko is rate-limiting this machine and nothing is cached yet\n\
+                     the keyless allowance is 5-15 requests a minute — wait a moment, or put a\n\
+                     free demo key in `api_key` (`coins config --edit`) for 100 a minute"
+                ),
+                _ => bail!(
+                    "could not reach CoinGecko and no cached prices are available\n\
+                     check your connection, then try again"
+                ),
+            }
+        }
+        let mut warnings = self.price_warnings(&ids, &markets);
+
+        // What each view is for: plain `price` shows exactly what you track,
+        // predictably and without hinting at holdings; the holdings view adds
+        // every coin you hold, so one is never invisible merely because it is
+        // not in `coins`.
+        let show_addresses = view == View::Balance || self.cfg.show_addresses;
+        let display: Vec<String> = match &focus_id {
+            Some(f) => vec![f.clone()],
+            None if show_addresses => self.cfg.quoted_coins(),
+            None => self.cfg.coins.clone(),
+        };
+
+        // Wallet warnings are kept apart, so a private screen says nothing
+        // about your wallets.
+        let mut wallet_warnings: Vec<String> = Vec::new();
+        let (per_wallet, amounts) = self.holdings(&ids, &markets, &mut wallet_warnings);
+        let wallet_trouble = !wallet_warnings.is_empty();
+        if show_addresses {
+            warnings.append(&mut wallet_warnings);
+        }
+
+        let mut rows = build_rows(&display, &markets, &amounts, focus_id.is_some());
+        if rows.is_empty() {
+            bail!("nothing to show — add a coin with `coins add bitcoin`");
+        }
+
+        // Which coins get a chart, and which need price history at all.
+        let (plan, charted) = plan_chart(view, focus_id.is_some(), rows.len());
+        if plan == ChartPlan::Facets && charted.len() < rows.len() {
+            warnings.push(format!(
+                "plotting the first {} of {} coins — each one costs a request",
+                charted.len(),
+                rows.len()
+            ));
+        }
+        let want_series: Vec<usize> = if plan == ChartPlan::Off {
+            // The list view's per-row plots need history for every row, but not
+            // at the price of a request each once the list gets long.
+            if inline_plots && rows.len() <= MAX_INLINE_SERIES {
+                (0..rows.len()).collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            charted.clone()
+        };
+        self.attach_series(&mut rows, &want_series);
+
+        // Each source is valued on its own, so it can have its own group of rows.
+        let mut sources: Vec<HoldingSource> = per_wallet
+            .iter()
+            .map(|w| HoldingSource {
+                label: w.label.clone(),
+                address: Some(w.address.clone()),
+                coins: breakdown(&rows, &w.amounts),
+            })
+            .collect();
+        if !self.cfg.holdings.is_empty() {
+            sources.push(HoldingSource {
+                label: "off-chain".into(),
+                address: None,
+                coins: breakdown(&rows, &self.cfg.holdings.clone()),
+            });
+        }
+        let portfolio = portfolio::build(&rows, sources);
+
+        // Silent only when there is genuinely nothing to say: a wallet that
+        // could not be read has its own warning to show, so render instead.
+        if view == View::Balance && !wallet_trouble && !rows.iter().any(|r| r.amount > 0.0) {
+            bail!(
+                "nothing held yet — add an address with `coins add <address>`, or amounts under `[holdings]` in the config"
+            );
+        }
+
+        Ok(Snapshot {
+            rows,
+            currency: self.cfg.currency.clone(),
+            range: self.cfg.range,
+            plan,
+            show_table: plan == ChartPlan::Off,
+            show_addresses,
+            charted,
+            age,
+            status,
+            portfolio,
+            warnings,
+        })
+    }
+
+    /// Balances for every tracked coin the address can hold, kept per wallet so
+    /// each address can be shown and valued on its own rows.
+    fn wallet_amounts(&self, ids: &[String], warnings: &mut Vec<String>) -> Vec<WalletBalances> {
+        // One token-address lookup per chain actually in use, not per wallet.
+        let mut chains: Vec<Chain> = Vec::new();
+        for w in &self.cfg.wallets {
+            let Some(c) = w.chain() else { continue };
+            if !chains.contains(&c) {
+                chains.push(c);
+            }
+        }
+        let mut tokens: Vec<(Chain, BTreeMap<String, String>)> = Vec::new();
+        for chain in chains {
+            // A chain with no token layer needs no lookup at all.
+            if chain.platform_key().is_none() {
+                continue;
+            }
+            let map = self.platform_contracts(chain, ids, warnings);
+            tokens.push((chain, map));
+        }
+
+        let mut out: Vec<WalletBalances> = Vec::new();
+        for wallet in &self.cfg.wallets {
+            let label = wallet.label.clone().unwrap_or_else(|| "wallet".to_string());
+            // An address this build cannot read is reported here rather than
+            // refused at load time, which would take every command down.
+            let Some(chain) = wallet.chain() else {
+                warnings.push(format!(
+                    "{label}: {} is not an address price can read — it expects an Ethereum address (0x + 40 hex) or a Solana address (43-44 base58)",
+                    crate::wallet::short_address(&wallet.address)
+                ));
+                continue;
+            };
+            let addr = wallet.address.to_ascii_lowercase();
+            let mut amounts: BTreeMap<String, f64> = BTreeMap::new();
+            let rpc = Rpc::new(chain, wallet.rpc.as_deref());
+
+            // The chain's own currency, which every address on it can hold.
+            let native = chain.native_coin();
+            if ids.iter().any(|i| i == native) {
+                let key = format!("wallet-{}-{addr}-{native}", chain.name());
+                match self.cached_balance(&key, || rpc.native_balance(&wallet.address)) {
+                    Ok(v) => *amounts.entry(native.to_string()).or_insert(0.0) += v,
+                    // `{:#}` so the cause is shown: the outermost context is
+                    // only "via <endpoint>", which says nothing on its own.
+                    Err(e) => warnings.push(format!("{label}: {e:#}")),
+                }
+            }
+
+            let map = tokens.iter().find(|(c, _)| *c == chain).map(|(_, m)| m);
+            for (id, token) in map.into_iter().flatten() {
+                // Ethereum needs the token's own decimals; a Solana token
+                // account reports an amount that is already scaled.
+                let decimals = match chain {
+                    Chain::Ethereum => {
+                        let dec_key = format!("decimals-{token}");
+                        match self.cache.get_fresh::<u32>(&dec_key, META_TTL) {
+                            Some(d) => d,
+                            None => match rpc.token_decimals(token) {
+                                Ok(d) => {
+                                    self.cache.put(&dec_key, &d);
+                                    d
+                                }
+                                Err(_) => 18,
+                            },
+                        }
+                    }
+                    Chain::Solana => 0,
+                };
+                let key = format!("wallet-{}-{addr}-{id}", chain.name());
+                match self.cached_balance(&key, || {
+                    rpc.token_balance(&wallet.address, token, decimals)
+                }) {
+                    Ok(v) if v > 0.0 => *amounts.entry(id.clone()).or_insert(0.0) += v,
+                    Ok(_) => {}
+                    Err(e) => warnings.push(format!("{label} / {id}: {e:#}")),
+                }
+            }
+            out.push(WalletBalances {
+                label,
+                address: wallet.address.clone(),
+                amounts,
+            });
+        }
+        out
+    }
+
+    fn cached_balance<F>(&self, key: &str, fetch: F) -> Result<f64>
+    where
+        F: FnOnce() -> Result<f64>,
+    {
+        if !self.force {
+            if let Some(v) = self.cache.get_fresh::<f64>(key, WALLET_TTL) {
+                return Ok(v);
+            }
+        }
+        match fetch() {
+            Ok(v) => {
+                self.cache.put(key, &v);
+                Ok(v)
+            }
+            Err(e) => match self.cache.get::<f64>(key) {
+                Some(hit) => Ok(hit.value),
+                None => Err(e),
+            },
+        }
+    }
+
+    /// Token addresses for tracked coins on one chain, cached per coin. A
+    /// single `/coins/list` request covers every coin, so this costs at most
+    /// one call per chain per 30 days.
+    fn platform_contracts(
+        &self,
+        chain: Chain,
+        ids: &[String],
+        warnings: &mut Vec<String>,
+    ) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        let mut missing = Vec::new();
+        let key = |id: &str| format!("contract-{}-{id}", chain.name());
+        for id in ids {
+            // The chain's own currency is not a token on it.
+            if id == chain.native_coin() {
+                continue;
+            }
+            match self.cache.get_fresh::<Option<String>>(&key(id), META_TTL) {
+                Some(Some(addr)) => {
+                    out.insert(id.clone(), addr);
+                }
+                Some(None) => {}
+                None => missing.push(id.clone()),
+            }
+        }
+        let Some(platform) = chain.platform_key() else { return out };
+        if !missing.is_empty() {
+            match self.api.platform_contracts(platform, ids) {
+                Ok(found) => {
+                    for id in ids {
+                        let addr = found.get(id).cloned();
+                        self.cache.put(&key(id), &addr);
+                        if let Some(a) = addr {
+                            out.insert(id.clone(), a);
+                        }
+                    }
+                }
+                Err(e) => warnings.push(format!(
+                    "could not look up {} token addresses: {e}",
+                    chain.name()
+                )),
+            }
+        }
+        out
+    }
+
+    /// `coins __warm`: refresh the cache quietly for the next invocation.
+    pub fn warm(&self) -> Result<()> {
+        let ids = self.cfg.quoted_coins();
+        let changes = self.cfg.change_columns();
+        let markets = self.api.markets(&ids, &self.cfg.currency, &changes)?;
+        self.cache.put(&self.markets_key(), &markets);
+        // Balances too, so a run with wallets doesn't block on the chain.
+        if !self.cfg.wallets.is_empty() {
+            let mut ignored = Vec::new();
+            let _ = self.wallet_amounts(&ids, &mut ignored);
+        }
+        // The 1-week series rides along with the prices request; other ranges
+        // need one call per coin, which is exactly what a background warm is for.
+        if self.cfg.range != Range::W1 {
+            let count = self.cfg.coins.len().min(MAX_INLINE_SERIES);
+            for i in 0..count {
+                if let Some(id) = self.cfg.coins.get(i) {
+                    let key = format!("chart-{id}-{}-{}", self.cfg.currency, self.cfg.range.key());
+                    if let Ok(v) = self.api.market_chart(id, &self.cfg.currency, self.cfg.range.days())
+                    {
+                        self.cache.put(&key, &v);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Extends a series with the live quote when it is newer than the last point.
+fn append_quote(series: &mut Series, market: &Market) {
+    let Some(price) = market.current_price.filter(|p| p.is_finite() && *p > 0.0) else { return };
+    let ts = market
+        .last_updated
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp_millis());
+    let Some(ts) = ts else { return };
+    match series.last_mut() {
+        Some((last_t, _)) if ts > *last_t => series.push((ts, price)),
+        // The 7-day sparkline is pinned to this very timestamp, and at that
+        // instant the quote is the authoritative value.
+        Some((last_t, last_v)) if ts == *last_t => *last_v = price,
+        Some(_) => {}
+        None => series.push((ts, price)),
+    }
+}
+
+/// Currencies common enough to trust without asking CoinGecko. Doubles as the
+/// completion list for `-c`.
+pub const COMMON_CURRENCIES: &[&str] = &[
+    "usd", "eur", "gbp", "chf", "jpy", "cny", "dkk", "sek", "nok", "isk", "pln", "czk", "huf",
+    "aud", "cad", "nzd", "sgd", "hkd", "krw", "inr", "brl", "mxn", "zar", "try", "rub", "ils",
+    "aed", "sar", "thb", "twd", "vnd", "php", "idr", "myr", "btc", "eth", "sats", "bits",
+];
+
+/// One row per coin to display, coloured by its place in that order.
+fn build_rows(
+    display: &[String],
+    markets: &[Market],
+    amounts: &BTreeMap<String, f64>,
+    focused: bool,
+) -> Vec<Row> {
+    display
+        .iter()
+        .filter_map(|id| {
+            let market = markets.iter().find(|m| &m.id == id)?;
+            // Palette slot from the display order, which starts with the
+            // config's own — so a tracked coin keeps its colour, and a held
+            // but untracked one gets a slot of its own rather than sharing.
+            let color = if focused {
+                0
+            } else {
+                display.iter().position(|c| c == id).unwrap_or(0)
+            };
+            Some(Row {
+                market: market.clone(),
+                color,
+                series: None,
+                amount: amounts.get(id).copied().unwrap_or(0.0),
+            })
+        })
+        .collect()
+}
+
+/// A source's holdings as (coin id, amount), most valuable first.
+fn breakdown(rows: &[Row], amounts: &BTreeMap<String, f64>) -> Vec<(String, f64)> {
+    let mut out: Vec<(String, f64)> = amounts
+        .iter()
+        .filter(|(_, a)| **a > 0.0)
+        .map(|(id, a)| (id.clone(), *a))
+        .collect();
+    out.sort_by(|a, b| {
+        let value = |id: &str, amount: f64| {
+            rows.iter()
+                .find(|r| r.market.id == id)
+                .and_then(|r| r.market.current_price)
+                .unwrap_or(0.0)
+                * amount
+        };
+        value(&b.0, b.1).total_cmp(&value(&a.0, a.1))
+    });
+    out
+}
+
+/// One wallet's balances, before they are merged into the coin rows.
+struct WalletBalances {
+    label: String,
+    address: String,
+    amounts: BTreeMap<String, f64>,
+}
+
+#[derive(Debug)]
+pub enum Match {
+    /// One coin matched exactly, or one clearly leads on market cap.
+    One(SearchCoin),
+    /// Several exact matches — the caller must pick an id.
+    Many(Vec<SearchCoin>),
+    /// Nothing matched exactly; these are the nearest names we saw.
+    Unknown(Vec<SearchCoin>),
+}
+
+/// Refuses a typo, but names the coins that might have been meant.
+pub fn no_match_message(query: &str, near: &[SearchCoin]) -> String {
+    if near.is_empty() {
+        return format!(
+            "no coin matches {query:?} — check the spelling, or pass a CoinGecko id such as \"bitcoin\""
+        );
+    }
+    format!(
+        "no coin is called {query:?} — did you mean one of these?\n{}\n(add by id, e.g. `coins add {}`)",
+        coin_list(near),
+        near[0].id
+    )
+}
+
+fn coin_list(candidates: &[SearchCoin]) -> String {
+    candidates
+        .iter()
+        .map(|c| {
+            let rank = c
+                .market_cap_rank
+                .map(|r| format!(", #{r}"))
+                .unwrap_or_default();
+            format!("  {} ({}{})", c.id, c.symbol.to_ascii_uppercase(), rank)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn ambiguous_message(query: &str, candidates: &[SearchCoin]) -> String {
+    format!(
+        "several coins match {query:?} — re-run with one of these ids:\n{}",
+        coin_list(candidates)
+    )
+}
+
+fn plan_chart(view: View, focused: bool, count: usize) -> (ChartPlan, Vec<usize>) {
+    if count == 0 {
+        return (ChartPlan::Off, Vec::new());
+    }
+    // Both the list and the holdings view are tables, not plots; only `price
+    // plot` (and a named coin) draws a chart.
+    if matches!(view, View::List | View::Balance) {
+        return (ChartPlan::Off, Vec::new());
+    }
+    if focused || count == 1 {
+        return (ChartPlan::Single, vec![0]);
+    }
+    (ChartPlan::Facets, (0..count.min(MAX_FACETS)).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_table_views_draw_no_big_chart() {
+        for view in [View::List, View::Balance] {
+            let (plan, charted) = plan_chart(view, false, 5);
+            assert_eq!(plan, ChartPlan::Off, "{view:?} should stay a table");
+            assert!(charted.is_empty());
+        }
+    }
+
+    #[test]
+    fn plot_draws_one_chart_per_coin() {
+        assert_eq!(plan_chart(View::Plot, false, 5).0, ChartPlan::Facets);
+        // A single coin is a single chart.
+        assert_eq!(plan_chart(View::Plot, false, 1).0, ChartPlan::Single);
+    }
+
+    #[test]
+    fn focus_always_wins() {
+        assert_eq!(plan_chart(View::Plot, true, 5).0, ChartPlan::Single);
+    }
+
+    #[test]
+    fn plotted_series_are_capped() {
+        assert_eq!(plan_chart(View::Plot, false, 20).1.len(), MAX_FACETS);
+    }
+}

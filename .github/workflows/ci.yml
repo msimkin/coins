@@ -1,0 +1,68 @@
+# The same three checks the README asks a contributor to run, on both platforms the
+# tool supports. Nothing here needs apt packages: TLS is rustls rather than OpenSSL,
+# and there is no C dependency at all.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    # macOS is where this is developed; Ubuntu is the half that cannot be tested by
+    # hand here, and so the half most likely to break.
+    name: test · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+      - name: The emitted shell functions must parse
+        # A syntax error in the emitted script takes the whole `eval` down at shell
+        # start-up rather than degrading, so both dialects are parsed here.
+        run: |
+          cargo run --locked --quiet -- completions bash > /tmp/coins.bash
+          bash -n /tmp/coins.bash
+          cargo run --locked --quiet -- completions zsh > /tmp/coins.zsh
+          if command -v zsh >/dev/null; then zsh -n /tmp/coins.zsh; fi
+      - name: A rendered screen must not depend on the network
+        # Every view, with the API pointed at a closed port and no cache: the tool
+        # must say so and exit cleanly rather than hang or panic.
+        run: |
+          export COINS_API_BASE=http://127.0.0.1:9
+          export COINS_CONFIG="$(mktemp -d)/config.toml"
+          export COINS_CACHE="$(mktemp -d)"
+          for view in "" "balance" "plot"; do
+            # `|| code=$?` rather than `$?` on its own line: the step runs under
+            # `set -e`, which would abort before the status could be read.
+            code=0
+            cargo run --locked --quiet -- $view > /dev/null 2>&1 || code=$?
+            if [ $code -ne 0 ] && [ $code -ne 1 ]; then
+              echo "coins $view exited $code with no network"; exit 1
+            fi
+          done
+
+  lint:
+    # Pinned to the declared minimum, so a new stable clippy inventing a lint
+    # overnight cannot turn the repository red on its own.
+    name: clippy · rust 1.86 (declared minimum)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.86 --profile minimal --component clippy
+      - name: Clippy, warnings denied
+        run: cargo +1.86 clippy --all-targets --locked -- -D warnings
+      - name: Tests, on the minimum supported version
+        run: cargo +1.86 test --locked
