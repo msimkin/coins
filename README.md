@@ -7,6 +7,11 @@
 Cryptocurrency prices, charts and holdings in your terminal. Type `coins`, see where
 things stand.
 
+Prices come from [CoinGecko](https://docs.coingecko.com), quoted directly in your own
+currency. Balances, if you want them, are read straight from public Ethereum and
+Solana endpoints — no API key, no account, and nothing sent anywhere but the coin ids
+you track and the addresses you added yourself.
+
 ```
                                                              updated 16s ago
   ──────────────────────────────────────────────────────────────────────────
@@ -329,8 +334,7 @@ ENS names (`coins add mark.eth`); chains beyond Ethereum; cost basis and P&L.
 
 MIT — see [LICENSE](LICENSE).
 
-Prices come from [CoinGecko](https://docs.coingecko.com) at runtime under their
-[terms](https://www.coingecko.com/en/api_terms); nothing from them is redistributed
-here. Balances are read straight from public Ethereum and Solana RPC endpoints. No
-key, no account, and no telemetry: the only things this tool sends anywhere are the
-coin ids you track and the addresses you added yourself.
+Prices are fetched at runtime under CoinGecko's
+[API terms](https://www.coingecko.com/en/api_terms); nothing from them is
+redistributed here, and the built-in list of popular coins holds ids and tickers
+only.
