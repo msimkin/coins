@@ -1,5 +1,7 @@
 # coins
 
+<img src="docs/icon.png" width="76" align="right" alt="">
+
 [![CI](https://github.com/msimkin/coins/actions/workflows/ci.yml/badge.svg)](https://github.com/msimkin/coins/actions/workflows/ci.yml)
 
 Cryptocurrency prices, charts and holdings in your terminal.
