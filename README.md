@@ -6,7 +6,7 @@
 
 Cryptocurrency prices, charts and holdings in your terminal.
 
-![Three coins with their price and the change over 1h, 24h and 30 days](docs/market.png)
+![Three coins with their price and the change over 1h, 24h, 30 days, 6 months and a year](docs/market.png)
 
 One row per coin: the price, then a change column for every period you name. Prices
 come from [CoinGecko](https://docs.coingecko.com), quoted directly in your own
