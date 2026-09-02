@@ -1,24 +1,26 @@
-# coins
+<img src="docs/icon.png" width="64" alt="">
 
-<img src="docs/icon.png" width="76" align="right" alt="">
+# coins
 
 [![CI](https://github.com/msimkin/coins/actions/workflows/ci.yml/badge.svg)](https://github.com/msimkin/coins/actions/workflows/ci.yml)
 
 Cryptocurrency prices, charts and holdings in your terminal.
 
-![The coins table: three coins with price, change columns and a sparkline each](docs/market.png)
+![Three coins with their price and the change over 1h, 24h and 30 days](docs/market.png)
 
-One row per coin: the price, a change column for each period you ask for, and a
-sparkline over the period in `range`. Prices come from
-[CoinGecko](https://docs.coingecko.com), quoted directly in your own currency.
+One row per coin: the price, then a change column for every period you name. Prices
+come from [CoinGecko](https://docs.coingecko.com), quoted directly in your own
+currency.
 
-`coins plot` draws the same data full size, one chart per coin:
+`coins plot` draws the charts, as many to a row as the terminal fits:
 
-![Two full-size charts side by side, ETH and SOL over a month](docs/plot.png)
+![Four charts in a two-by-two grid: BTC, ETH, SOL and STRK over a month](docs/plot.png)
 
-Every coin gets its own axis, in money: coins worth $2,400 and $100 cannot share one
-usefully. Curves are drawn with braille dots, 2×4 per character cell, so they stay
-smooth at any terminal width.
+`coins eth` draws one of them alone:
+
+![One full-width chart of ETH over a month](docs/eth.png)
+
+Curves are braille dots, 2×4 to a character cell, so they stay smooth at any width.
 
 ## Install
 
@@ -36,9 +38,8 @@ The first run writes `~/.config/coins/config.toml` with every option commented.
 
 ```sh
 coins                 # prices
-coins plot            # the full-size charts
-coins plot btc        # one coin, full size
-coins btc             # short for the above
+coins plot            # the charts
+coins eth             # one coin, full width
 coins add sol         # track a coin, by ticker, name or CoinGecko id
 coins add 0xd8dA…     # track an address; its balances become holdings
 coins rm sol          # stop tracking a coin or an address
@@ -47,7 +48,7 @@ coins config --edit   # open the config in $EDITOR
 ```
 
 Any unambiguous prefix works: `coins b` is `coins balance`, `coins p` is `coins
-plot`. `-c eur` and `-r 1m` override the configured currency and period for one run.
+plot`. `-c eur` and `-r 1m` change the currency and the period for one run.
 
 `add` takes only an exact match on id, ticker or name, so a typo cannot quietly
 become a coin you did not mean:
@@ -59,8 +60,8 @@ coins: no coin is called "bitcon" — did you mean one of these?
 (add by id, e.g. `coins add bitcone`)
 ```
 
-The 250 largest coins are built in, so `coins add btc` resolves without a request.
-Tab completion draws on the same list.
+The 250 largest coins are built in, so `coins add btc` needs no request. Tab
+completion offers the same list.
 
 ## Configure
 
@@ -69,17 +70,17 @@ Everything lives in `~/.config/coins/config.toml`:
 ```toml
 coins       = ["bitcoin", "ethereum"]  # tracked coins; order fixes each coin's colour
 currency    = "usd"                    # any CoinGecko vs_currency: usd, eur, gbp, btc, …
-range       = "1w"                     # 1d | 1w | 1m | 3m | 6m | 1y | all
-columns     = ["1h", "24h", "7d"]      # change columns: 1h 24h 7d 14d 30d 3m 6m 200d 1y
+range       = "1w"                     # how much history a chart covers
+columns     = ["1h", "24h", "7d"]      # 1h 24h 7d 14d 30d 3m 6m 200d 1y
 
-inline_plot = true                     # the sparkline beside each coin
+inline_plot = false                    # add a sparkline to the right of every row
 show_addresses = false                 # let plain `coins` show holdings too
-height      = 14                       # `coins plot` height, in terminal rows
-thousands   = " "                      # digit grouping in prices: " " | "," | "." | ""
-max_decimals = 3                       # ceiling on price decimals; a column shares
-                                       # whichever count its neediest row needs
-theme       = "dark"                   # dark | light — match your terminal background
-api_key     = ""                       # a free CoinGecko demo key raises the rate limit
+balance     = "all"                    # `coins balance`: all | addresses
+height      = 14                       # chart height, in terminal rows
+thousands   = " "                      # digit grouping: " " | "," | "." | ""
+max_decimals = 3                       # ceiling on price decimals
+theme       = "dark"                   # dark | light
+api_key     = ""                       # a CoinGecko demo key raises the rate limit
 
 [holdings]                             # coins held somewhere with no address
 bitcoin = 0.25
@@ -89,63 +90,51 @@ address = "0x…"
 label   = "main"
 ```
 
-`coins add` and `coins rm` edit the file in place, leaving your comments and layout
-alone. `coins config` never parses it, so a file the tool refuses to read still has
-a way in.
+Every price in a column shares one decimal count — as many as its neediest row
+needs, up to `max_decimals` — so the decimal marks line up on their own.
+
+`coins add` and `coins rm` edit the file in place, leaving your comments alone.
+`coins config` never parses it, so a file the tool refuses to read still has a way
+in.
 
 ## Holdings
 
-Two sources, which add up:
+Two sources, which add up: `[holdings]` in the config, for coins held somewhere
+without an address, and `coins add <address>` for balances read from the chain. The
+chain follows from the address — `0x` and 40 hex digits is Ethereum, 43–44 base58
+characters is Solana — and one address holds the chain's own coin plus any token you
+track, so the group has a row per holding rather than per address.
 
-- `[holdings]` in the config, for coins held somewhere without an address.
-- `coins add <address>`, for balances read from the chain. The chain follows from the
-  address: `0x` and 40 hex digits is Ethereum, read with `eth_getBalance` and
-  `balanceOf` per tracked ERC-20; 43–44 base58 characters is Solana, read with
-  `getBalance` and `getTokenAccountsByOwner` per tracked SPL mint.
-
-One address holds the chain's own coin plus any token you track, so the group has a
-row per holding rather than per address:
-
-![The balance view: coins, addresses with amounts, a total and an allocation bar](docs/balance.png)
+![The balance view: coins, then addresses with amounts, a total and an allocation bar](docs/balance.png)
 
 The addresses and amounts above are made up.
 
 **Plain `coins` shows prices only** — no addresses, no portfolio — so checking the
 market with someone beside you does not put your holdings on the screen. `coins
-balance` is the full picture; `show_addresses = true` makes it the default.
+balance` is the full picture. Two options move that line: `show_addresses = true`
+puts holdings in every view, and `balance = "addresses"` leaves the coin table out
+of `coins balance`, so the two commands divide the screen between them.
 
-Two things worth knowing:
+A token you hold but do not track stays invisible until you `coins add` it. Whichever
+RPC endpoint answers sees the address you asked about; the defaults are public nodes,
+and `rpc = "…"` on a wallet points at your own.
 
-- **Only coins you track are looked up.** A token you hold but do not track stays
-  invisible until you `coins add` it.
-- **Whichever RPC endpoint answers sees the address you asked about.** The defaults
-  are public nodes; `rpc = "…"` on a wallet points at your own.
+## Prices
 
-## Prices and caching
+The keyless CoinGecko API allows roughly 5–15 requests a minute; a free demo key in
+`api_key` raises it to 100. At `range = "1w"` a screen is one request, which carries
+every price, every change column and a week of history together. Other ranges need a
+chart per coin, as do the `3m` and `6m` columns — one chart serves both, since 180
+days of history contains the last 90.
 
-The keyless CoinGecko API allows roughly 5–15 requests a minute, and a free demo key
-in `api_key` raises that to 100.
+Charts are cached in `~/.cache/coins` for five minutes to a day, depending on how
+fast the period moves. The top line always states the age of what you are looking at,
+and says `offline` or `rate-limited` when it could not refresh.
 
-At `range = "1w"` a whole screen is **one** request: `/coins/markets` carries every
-price, the change columns and a 7-day sparkline together. Other ranges need one
-chart per coin, as do the `3m` and `6m` columns — one chart covers both, since 180
-days of history contains the last 90. Charts are cached for 5 minutes to a day,
-depending on how fast the period moves.
+## Maintenance
 
-Responses live in `~/.cache/coins`. Under a minute old, a run draws from cache and
-makes no request; older, it draws from cache at once and refreshes in the background;
-older still, it fetches first. The top line always states the age of what you are
-looking at, and says `offline` or `rate-limited` when it could not refresh.
-
-## Environment
-
-| Variable | Effect |
-|---|---|
-| `NO_COLOR` | disable colour (truecolor, 256-colour and 16-colour terminals are detected otherwise) |
-| `COINS_CONFIG` | use a different config file |
-| `COINS_CACHE` | use a different cache directory |
-| `COINS_WIDTH` | assume this terminal width, for piping to a file or pager |
-| `COINS_API_BASE` | point at a CoinGecko mirror or proxy |
+`src/coins.rs` holds the built-in coin list. `coins __popular` prints a fresh one from
+CoinGecko, ready to replace everything below that file's header.
 
 ## Licence
 
