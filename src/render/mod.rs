@@ -14,10 +14,15 @@ use theme::{SLine, Theme, vis_width};
 const INDENT: &str = "  ";
 /// Past this width the eye has to travel too far between columns.
 const MAX_WIDTH: usize = 128;
+/// Charts may use more of a wide terminal than a table may. A row of figures
+/// past 128 columns is hard to read back to its label, but a chart is only more
+/// resolution — and four labelled facets side by side need the room.
+const MAX_CHART_WIDTH: usize = 208;
 
 /// The whole screen, as lines ready to print.
 pub fn screen(snap: &Snapshot, cfg: &Config, theme: &Theme, term_width: usize) -> Vec<String> {
-    let width = term_width.min(MAX_WIDTH).saturating_sub(INDENT.len() * 2);
+    let cap = if snap.show_table { MAX_WIDTH } else { MAX_CHART_WIDTH };
+    let width = term_width.min(cap).saturating_sub(INDENT.len() * 2);
 
     // The body is built first so the header and its rule can be sized to the
     // content. Stretching them to the terminal instead leaves a rule hanging
@@ -50,7 +55,7 @@ pub fn screen(snap: &Snapshot, cfg: &Config, theme: &Theme, term_width: usize) -
         .map(|l| vis_width(&braille::strip_ansi(l)))
         .max()
         .unwrap_or(width)
-        .clamp(36, MAX_WIDTH - INDENT.len() * 2);
+        .clamp(36, cap - INDENT.len() * 2);
 
     if let Some(p) = &snap.portfolio {
         // The address groups live inside the table, so they share its column
@@ -204,6 +209,14 @@ fn single_chart(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> V
     )
 }
 
+/// A title with everything in it: the coin, its price, its change and the period.
+/// Used where only the plot's own measurements are wanted from a render.
+const ALL_PARTS: (bool, bool, bool) = (true, true, true);
+
+/// The narrowest a facet may be: below this the plot itself stops saying
+/// anything, however little its title is asked to carry.
+const MIN_FACET: usize = 26;
+
 /// One small chart per coin. Coins of different value cannot share a y-scale
 /// usefully, and a shared *percent* scale keeps only three lines apart for a
 /// colour-blind reader — so every coin gets its own axis, in money.
@@ -218,7 +231,30 @@ fn facet_charts(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> V
         return Vec::new();
     }
     let gap = 3usize;
-    let Some((columns, col_w)) = grid(charted.len(), width, gap) else {
+    // What a facet costs to label, before deciding how many will fit. The
+    // y-labels are set by the prices rather than by the width, so one render at
+    // the full width is enough to learn the gutter they need — and without this
+    // the grid would happily make four columns too narrow to say which coin
+    // each one is.
+    let probe = (cfg.height / 2).clamp(5, 7);
+    let est = charted
+        .iter()
+        .map(|row| braille::gutter_of(&facet(row, snap, theme, width, probe, 0, ALL_PARTS)))
+        .max()
+        .unwrap_or(0);
+    // The whole title, period included: a facet that cannot say which period it
+    // covers is the reason this measurement exists, so the grid splits only when
+    // every facet it makes can carry the full label.
+    let want = charted
+        .iter()
+        .map(|row| title_width(row, snap, est, true, true, true))
+        .max()
+        .unwrap_or(MIN_FACET);
+    // A terminal too narrow for even one labelled facet still gets a chart: the
+    // title gives parts up instead, which is what its ladder is for.
+    let Some((columns, col_w)) = grid(charted.len(), width, gap, want.max(MIN_FACET))
+        .or_else(|| grid(charted.len(), width, gap, MIN_FACET))
+    else {
         return Vec::new();
     };
     // Side by side, facets can afford height; stacked, they must not run off
@@ -234,15 +270,32 @@ fn facet_charts(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> V
     // above it, starts at a different column.
     let gutter = charted
         .iter()
-        .map(|row| braille::gutter_of(&facet(row, snap, theme, col_w, height, 0)))
+        .map(|row| braille::gutter_of(&facet(row, snap, theme, col_w, height, 0, ALL_PARTS)))
         .max()
         .unwrap_or(0);
+
+    // The most a title can carry and still fit *every* facet in the grid. Deciding
+    // per facet would let one coin show its period while the coin beside it, with
+    // a longer price, could not.
+    let parts = [
+        (true, true, true),
+        (false, true, true),
+        (false, false, true),
+        (false, false, false),
+    ]
+    .into_iter()
+    .find(|(a, b, c)| {
+        charted
+            .iter()
+            .all(|row| title_width(row, snap, gutter, *a, *b, *c) <= col_w)
+    })
+    .unwrap_or((false, false, false));
 
     let mut out = Vec::new();
     for chunk in charted.chunks(columns) {
         let blocks: Vec<Vec<String>> = chunk
             .iter()
-            .map(|row| facet(row, snap, theme, col_w, height, gutter))
+            .map(|row| facet(row, snap, theme, col_w, height, gutter, parts))
             .collect();
         let widths = vec![col_w; blocks.len()];
         if !out.is_empty() {
@@ -254,19 +307,48 @@ fn facet_charts(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> V
 }
 
 
-/// How many facets go side by side, and how wide each one is.
+/// How many facets go side by side, and how wide each one is, given the least a
+/// facet may be.
 ///
 /// The rows are balanced rather than filled: four charts in a terminal that fits
 /// three go two and two, not three and one. So the widest grid that fits sets the
 /// row count, and the columns are then spread evenly over that many rows.
-fn grid(count: usize, width: usize, gap: usize) -> Option<(usize, usize)> {
-    const MIN_W: usize = 26;
-    let fits = (width + gap) / (MIN_W + gap);
+fn grid(count: usize, width: usize, gap: usize, min_w: usize) -> Option<(usize, usize)> {
+    let fits = (width + gap) / (min_w + gap);
     let widest = fits.min(count).max(1);
     let rows = count.div_ceil(widest);
     let columns = count.div_ceil(rows);
     let col_w = (width - gap * (columns - 1)) / columns;
-    (col_w >= MIN_W).then_some((columns, col_w))
+    (col_w >= min_w).then_some((columns, col_w))
+}
+
+/// The columns a facet title takes: the indent, the coloured chip, and whichever
+/// of the price, the change and its period are being kept. One function, because
+/// the grid asks what a title costs before it decides how wide a facet is, and
+/// the title then has to hold itself to the same arithmetic.
+fn title_width(
+    row: &Row,
+    snap: &Snapshot,
+    gutter: usize,
+    with_period: bool,
+    with_price: bool,
+    with_change: bool,
+) -> usize {
+    let mut n = gutter + 1 + 2 + row.market.ticker().chars().count();
+    if with_price {
+        if let Some(p) = row.market.current_price {
+            n += 2 + fmt::money(p, &snap.currency).chars().count();
+        }
+    }
+    if with_change {
+        if let Some(v) = row.series.as_deref().and_then(change_over) {
+            n += 2 + fmt::percent(v).chars().count();
+            if with_period {
+                n += snap.range.short().chars().count() + 3; // " (…)"
+            }
+        }
+    }
+    n
 }
 
 fn facet(
@@ -276,39 +358,18 @@ fn facet(
     width: usize,
     height: usize,
     gutter: usize,
+    parts: (bool, bool, bool),
 ) -> Vec<String> {
     // Over the plot area rather than over the axis numbers — in a grid this
     // reads better, because the eye compares curves across panels.
     //
-    // A title wider than its facet would push every column to its right out of
-    // line, so it gives things up in order of what the reader can do without:
-    // the period first, then the price, then the change. The name of the coin
-    // always stays.
+    // Which parts the title keeps is decided once for the whole grid, in
+    // facet_charts: a row where one coin shows its period and its neighbour
+    // does not reads as an accident rather than as a fit.
     let price = row.market.current_price.map(|p| fmt::money(p, &snap.currency));
     let change = row.series.as_deref().and_then(change_over);
     let period = format!(" ({})", snap.range.short().to_ascii_lowercase());
-    let plain = |with_period: bool, with_price: bool, with_change: bool| {
-        let mut n = gutter + 1 + 2 + row.market.ticker().chars().count();
-        if with_price {
-            n += 2 + price.as_deref().map_or(0, |t| t.chars().count());
-        }
-        if with_change && change.is_some() {
-            n += 2 + fmt::percent(change.unwrap()).chars().count();
-            if with_period {
-                n += period.chars().count();
-            }
-        }
-        n
-    };
-    let (with_period, with_price, with_change) = [
-        (true, true, true),
-        (false, true, true),
-        (false, false, true),
-        (false, false, false),
-    ]
-    .into_iter()
-    .find(|(a, b, c)| plain(*a, *b, *c) <= width)
-    .unwrap_or((false, false, false));
+    let (with_period, with_price, with_change) = parts;
 
     let mut title = SLine::new();
     title.spaces(gutter + 1);
@@ -430,24 +491,32 @@ mod grid_tests {
     #[test]
     fn rows_are_balanced_rather_than_filled() {
         // A terminal that fits three columns, given four charts, uses two and two.
-        assert_eq!(grid(4, 110, 3).map(|(c, _)| c), Some(2));
+        assert_eq!(grid(4, 110, 3, 26).map(|(c, _)| c), Some(2));
         // Given five, it needs two rows either way, so it fills three then two.
-        assert_eq!(grid(5, 110, 3).map(|(c, _)| c), Some(3));
+        assert_eq!(grid(5, 110, 3, 26).map(|(c, _)| c), Some(3));
         // Wide enough for all four at once, they go in one row.
-        assert_eq!(grid(4, 160, 3).map(|(c, _)| c), Some(4));
+        assert_eq!(grid(4, 160, 3, 26).map(|(c, _)| c), Some(4));
         // Three charts, room for two: two and one.
-        assert_eq!(grid(3, 80, 3).map(|(c, _)| c), Some(2));
+        assert_eq!(grid(3, 80, 3, 26).map(|(c, _)| c), Some(2));
+    }
+
+    #[test]
+    fn a_wider_label_buys_fewer_columns() {
+        // The same terminal, once the titles need 37 columns rather than 26:
+        // four charts stop being four across and become two and two.
+        assert_eq!(grid(4, 130, 3, 26).map(|(c, _)| c), Some(4));
+        assert_eq!(grid(4, 130, 3, 37).map(|(c, _)| c), Some(2));
     }
 
     #[test]
     fn a_narrow_terminal_stacks_then_gives_up() {
-        assert_eq!(grid(3, 40, 3).map(|(c, _)| c), Some(1));
-        assert_eq!(grid(3, 20, 3), None, "no chart fits, so none is drawn");
+        assert_eq!(grid(3, 40, 3, 26).map(|(c, _)| c), Some(1));
+        assert_eq!(grid(3, 20, 3, 26), None, "no chart fits, so none is drawn");
     }
 
     #[test]
     fn every_column_gets_the_same_width() {
-        let (columns, w) = grid(4, 160, 3).unwrap();
+        let (columns, w) = grid(4, 160, 3, 26).unwrap();
         assert_eq!(columns, 4);
         assert!(w * columns + 3 * (columns - 1) <= 160);
     }
