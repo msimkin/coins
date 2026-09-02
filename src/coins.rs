@@ -1,9 +1,21 @@
 //! The top coins by market capitalisation, generated from CoinGecko.
 //!
 //! Two jobs: tab-completion candidates, and resolving a ticker to a coin id
-//! without a network request. Regenerate with the snippet in README.md when it
-//! grows stale — nothing breaks if it is out of date, since anything missing
-//! still resolves through `/search`.
+//! without a network request. Nothing breaks if the list is out of date, since
+//! anything missing still resolves through `/search`. To refresh it, replace the
+//! rows in `POPULAR` with the output of:
+//!
+//! ```sh
+//! curl -s "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1" \
+//! | python3 -c '
+//! import json, sys, unicodedata
+//! def clean(t):
+//!     t = "".join(c for c in t if unicodedata.category(c) not in ("Cf","Cc","Cs","Co","Cn"))
+//!     return " ".join(t.split())
+//! for c in json.load(sys.stdin):
+//!     print(f"""    ("{c["id"]}", "{c["symbol"].lower()}", "{clean(c["name"])}"),""")
+//! '
+//! ```
 //!
 //! Names are stripped of zero-width and control characters: they count as one
 //! character but render as none, which silently misaligns every column to
