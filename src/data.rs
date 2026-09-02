@@ -109,6 +109,9 @@ pub struct Snapshot {
     /// Which screen this is. The table needs it: `coins top` is a different
     /// shape from the others, not the same one with more rows.
     pub view: View,
+    /// Where the ranked coins end and the tracked ones from further down the
+    /// market begin, so the table can show the join.
+    pub top_break: Option<usize>,
     /// Whether the coins group appears at all. `balance = "addresses"` turns it
     /// off for that view, so the two commands divide the screen between them.
     pub show_coins: bool,
@@ -549,9 +552,15 @@ impl Fetcher {
         // can show someone.
         let show_addresses =
             view != View::Top && (view == View::Balance || self.cfg.show_addresses);
+        let mut top_break = None;
         let display: Vec<String> = match &focus_id {
             Some(f) => vec![f.clone()],
-            None if view == View::Top => ranked_by_value(&markets, top_count.unwrap_or(usize::MAX)),
+            None if view == View::Top => {
+                let (ids, at) =
+                    market_list(&markets, &self.cfg.coins, top_count.unwrap_or(self.cfg.top));
+                top_break = at;
+                ids
+            }
             None if show_addresses => self.cfg.quoted_coins(),
             None => self.cfg.coins.clone(),
         };
@@ -637,6 +646,7 @@ impl Fetcher {
             range: self.cfg.range,
             plan,
             view,
+            top_break,
             show_table: plan == ChartPlan::Off,
             show_addresses,
             show_coins,
@@ -915,6 +925,28 @@ fn no_rows_message(display: &[String], status: Status) -> String {
     }
 }
 
+/// The market list: the `n` most valuable coins, then the coins you track that
+/// did not make it, in their own place in the market.
+///
+/// Returns the ids and where the second group starts, if there is one — a coin
+/// of yours at rank 174 is worth seeing next to the giants, but it is not one of
+/// them, and the screen should not pretend the list simply continues.
+fn market_list(markets: &[Market], tracked: &[String], n: usize) -> (Vec<String>, Option<usize>) {
+    let ranked = ranked_by_value(markets, n);
+    let mut rest: Vec<&Market> = markets
+        .iter()
+        .filter(|m| tracked.iter().any(|t| t == &m.id) && !ranked.iter().any(|r| r == &m.id))
+        .collect();
+    rest.sort_by_key(|m| m.market_cap_rank.unwrap_or(u32::MAX));
+    if rest.is_empty() {
+        return (ranked, None);
+    }
+    let at = ranked.len();
+    let mut ids = ranked;
+    ids.extend(rest.into_iter().map(|m| m.id.clone()));
+    (ids, Some(at))
+}
+
 /// The coins in a set, most valuable first.
 ///
 /// By market capitalisation — circulating supply times price — which is what
@@ -1071,6 +1103,36 @@ mod tests {
             "id": id, "symbol": id, "name": id, "market_cap": cap
         }))
         .unwrap()
+    }
+
+    fn ranked(id: &str, cap: f64, rank: u32) -> Market {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "symbol": id, "name": id, "market_cap": cap, "market_cap_rank": rank
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_market_list_reaches_past_the_top_for_coins_you_track() {
+        let markets = vec![
+            ranked("big", 1e12, 1),
+            ranked("large", 5e11, 2),
+            ranked("small", 1e8, 174),
+            ranked("tiny", 1e7, 402),
+        ];
+        let tracked = vec!["small".to_string(), "tiny".to_string()];
+        let (ids, at) = market_list(&markets, &tracked, 2);
+        assert_eq!(ids, ["big", "large", "small", "tiny"]);
+        assert_eq!(at, Some(2), "the break is where the ranked coins end");
+    }
+
+    #[test]
+    fn a_tracked_coin_already_in_the_top_is_not_repeated() {
+        let markets = vec![ranked("big", 1e12, 1), ranked("large", 5e11, 2)];
+        let tracked = vec!["big".to_string()];
+        let (ids, at) = market_list(&markets, &tracked, 2);
+        assert_eq!(ids, ["big", "large"]);
+        assert_eq!(at, None, "nothing was appended, so there is no break to draw");
     }
 
     #[test]

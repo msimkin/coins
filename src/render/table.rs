@@ -308,6 +308,7 @@ fn top_section(
     snap: &Snapshot,
     cfg: &Config,
     style: Style,
+    trend_cells: usize,
     decimals: usize,
 ) -> Section {
     // Only the periods the prices request answers: a `3m` or `6m` column is a
@@ -315,22 +316,47 @@ fn top_section(
     let changes = cfg.market_columns();
     let mut header = vec!["#".to_string(), "COIN".to_string()];
     if style.with_name {
-        header.push(String::new());
+        header.push("NAME".to_string());
     }
     header.push("PRICE".to_string());
     header.push("MARKET CAP".to_string());
     for c in &changes {
         header.push(c.to_ascii_uppercase());
     }
+    // The week that came with the prices, for every coin here — this view has no
+    // charts of its own and asks for none.
+    let mut tail_header = Vec::new();
+    let mut tail_align = Vec::new();
+    if trend_cells > 0 {
+        tail_header.push("7 DAYS".to_string());
+        tail_align.push(Align::Left);
+    }
 
     let mut rows = Vec::new();
+    let mut tail_rows = Vec::new();
+    let blank = |n: usize| vec![Cell::Plain(String::new()); n];
     for (i, row) in snap.rows.iter().enumerate() {
+        // Where the ranked coins end and your own, from further down, begin.
+        if Some(i) == snap.top_break {
+            let width = rows.last().map_or(0, |r: &Vec<Cell>| r.len());
+            rows.push(blank(width));
+            tail_rows.push(blank(tail_header.len()));
+        }
         let m = &row.market;
-        let tracked = cfg.coins.iter().any(|c| c == &m.id);
         let chip = format!("● {}", m.ticker());
         let mut cells = vec![
-            Cell::Dim(format!("{}", i + 1)),
-            if tracked { Cell::Chip(chip, row.color) } else { Cell::Plain(chip) },
+            match m.market_cap_rank {
+                Some(r) => Cell::Dim(r.to_string()),
+                None => Cell::Dim("·".into()),
+            },
+            // Three levels and no new colour: yours, ordinary, and pegged.
+            if cfg.coins.iter().any(|c| c == &m.id) {
+                Cell::Chip(chip, row.color)
+            } else if crate::coins::STABLECOINS.contains(&m.id.as_str()) {
+                Cell::Dim(chip)
+            } else {
+                Cell::Plain(chip)
+            },
         ];
         if style.with_name {
             cells.push(Cell::Dim(fmt::clean_text(&m.name)));
@@ -345,15 +371,22 @@ fn top_section(
         });
         cells.extend(changes.iter().map(|c| delta_cell(row.change(c))));
         rows.push(cells);
+        if trend_cells > 0 {
+            let prices = trend_prices(row, false);
+            tail_rows.push(vec![Cell::Trend(
+                fmt::sparkline(&prices, trend_cells),
+                row.color,
+            )]);
+        }
     }
     let width = rows.first().map_or(0, |r| r.len());
     Section {
         header,
         align: vec![None; width],
         rows,
-        tail_header: Vec::new(),
-        tail_align: Vec::new(),
-        tail_rows: Vec::new(),
+        tail_header,
+        tail_align,
+        tail_rows,
         rule: None,
     }
 }
@@ -519,7 +552,7 @@ fn build(
         columns.push(Column { align: Align::Right });
         columns.push(Column { align: Align::Right });
         columns.extend(changes.iter().map(|_| Column { align: Align::Right }));
-        return (columns, vec![top_section(snap, cfg, style, decimals)]);
+        return (columns, vec![top_section(snap, cfg, style, trend_cells, decimals)]);
     }
     let holdings = holdings_of(snap, style.with_addresses);
     // The second column holds a coin's name among the coins and the wallet's

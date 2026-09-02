@@ -27,6 +27,9 @@ pub struct Market {
     pub name: String,
     pub current_price: Option<f64>,
     pub market_cap: Option<f64>,
+    /// CoinGecko's own place in the whole market, which is what a rank column
+    /// should say: a tracked coin outside the fifty shown is `174`, not `51`.
+    pub market_cap_rank: Option<u32>,
     pub total_volume: Option<f64>,
     pub ath: Option<f64>,
     pub ath_change_percentage: Option<f64>,
@@ -174,17 +177,23 @@ impl Api {
 
     /// The most valuable coins, for regenerating the built-in list. No ids: the
     /// point is to find out which coins are worth carrying.
-    pub fn top_markets(&self, currency: &str, count: usize) -> Result<Vec<Market>> {
+    pub fn top_markets(
+        &self,
+        currency: &str,
+        count: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<Market>> {
         let per_page = count.to_string();
-        self.get(
-            "/coins/markets",
-            &[
-                ("vs_currency", currency),
-                ("order", "market_cap_desc"),
-                ("per_page", per_page.as_str()),
-                ("page", "1"),
-            ],
-        )
+        let mut query = vec![
+            ("vs_currency", currency),
+            ("order", "market_cap_desc"),
+            ("per_page", per_page.as_str()),
+            ("page", "1"),
+        ];
+        if let Some(c) = category {
+            query.push(("category", c));
+        }
+        self.get("/coins/markets", &query)
     }
 
     pub fn market_chart(&self, id: &str, currency: &str, days: &str) -> Result<Series> {

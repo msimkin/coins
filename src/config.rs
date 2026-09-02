@@ -29,6 +29,9 @@ balance        = "all"      # what `coins balance` shows: all (prices and what
                             # you hold) | addresses (only what you hold, so the
                             # two commands divide the screen between them)
 height         = 14         # height of a `coins plot` chart, in terminal rows
+top            = 50         # rows in `coins top`, 1 to 50. It shows the change
+                            # columns that arrive with the prices; 3m and 6m are
+                            # a chart per coin, so fifty of them are left out
 
 thousands      = " "        # digit grouping in prices: " " | "," | "." | ""
 max_decimals   = 3          # most decimals a price may show; every price in a
@@ -181,6 +184,8 @@ struct Raw {
     range: String,
     #[serde(default = "default_height")]
     height: usize,
+    #[serde(default = "default_top")]
+    top: usize,
     #[serde(default)]
     inline_plot: bool,
     #[serde(default)]
@@ -230,6 +235,9 @@ fn default_max_decimals() -> usize {
 fn default_height() -> usize {
     14
 }
+fn default_top() -> usize {
+    50
+}
 fn default_balance() -> String {
     "all".into()
 }
@@ -252,6 +260,9 @@ pub struct Config {
     /// on the screen; `coins balance` shows it when you want it.
     pub show_addresses: bool,
     pub balance: BalanceView,
+    /// Rows in `coins top`. Fifty is every coin the prices request carries, so
+    /// the screen never costs a request whatever this says.
+    pub top: usize,
     /// Digit-group separator for prices. A space by default: "," and "." each
     /// mean the decimal point to half the world, so "$2,372" gets misread.
     pub thousands: String,
@@ -353,6 +364,7 @@ impl Config {
             inline_plot: raw.inline_plot,
             show_addresses: raw.show_addresses,
             balance: BalanceView::parse(&raw.balance)?,
+            top: raw.top.clamp(1, 50),
             thousands: raw.thousands.clone(),
             max_decimals: raw.max_decimals.min(10),
             columns: raw.columns.iter().map(|c| c.to_ascii_lowercase()).collect(),
@@ -767,6 +779,16 @@ mod template_tests {
     /// Every option the loader accepts must appear in the template with a note
     /// beside it, or it is an option nobody can discover.
     #[test]
+    fn the_row_count_stays_within_what_is_cached() {
+        // `top` names rows of a list that is fifty long; asking for more than
+        // that, or for none, would be asking for a request the screen refuses
+        // to make.
+        assert_eq!(default_top().clamp(1, 50), 50);
+        assert_eq!(0usize.clamp(1, 50), 1);
+        assert_eq!(9999usize.clamp(1, 50), 50);
+    }
+
+    #[test]
     fn every_column_has_exactly_one_source() {
         for c in CHANGE_COLUMNS {
             let market = MARKET_COLUMNS.contains(c);
@@ -796,6 +818,7 @@ mod template_tests {
             "inline_plot",
             "show_addresses",
             "balance",
+            "top",
             "height",
             "thousands",
             "max_decimals",

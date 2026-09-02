@@ -16,10 +16,6 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use config::Config;
-
-/// How many coins `coins top` lists when no number is given — the same fifty
-/// that ride along with every prices request, so the screen costs nothing.
-const TOP_DEFAULT: usize = 50;
 use data::{Fetcher, Match, View};
 use render::theme::{ColorLevel, Theme, term_width};
 
@@ -170,9 +166,8 @@ fn run() -> Result<()> {
             screen(cfg, &cli, &theme, View::Plot, coin.clone(), None)
         }
         Some(Command::Balance) => screen(cfg, &cli, &theme, View::Balance, None, None),
-        Some(Command::Top { count }) => {
-            screen(cfg, &cli, &theme, View::Top, None, Some(count.unwrap_or(TOP_DEFAULT)))
-        }
+        // No count means the config's, which is what `top` in the file is for.
+        Some(Command::Top { count }) => screen(cfg, &cli, &theme, View::Top, None, *count),
         Some(Command::Add { what, label }) => add(&cfg, what, label.as_deref(), &theme),
         Some(Command::Rm { what }) => remove(&cfg, what),
         Some(Command::Config { .. }) => Ok(()), // handled before the config is read
@@ -355,7 +350,7 @@ fn ticker_to_id(cfg: &Config, query: &str) -> Option<String> {
 /// and they silently misalign every column to their right.
 fn popular(cfg: &Config) -> Result<()> {
     let api = coingecko::Api::new(&cfg.api_key);
-    let markets = api.top_markets("usd", 250)?;
+    let markets = api.top_markets("usd", 250, None)?;
     println!("/// (id, symbol, name), most valuable first.");
     println!("pub const POPULAR: &[(&str, &str, &str)] = &[");
     for m in &markets {
@@ -365,6 +360,19 @@ fn popular(cfg: &Config) -> Result<()> {
             m.symbol.to_ascii_lowercase(),
             render::fmt::clean_text(&m.name)
         );
+    }
+    println!("];");
+
+    // CoinGecko's own categorisation rather than a guess at one. A pegged coin
+    // can be told from its behaviour — a week without a move — but only while
+    // the currency it is pegged to sits still against the one on the screen.
+    let stable = api.top_markets("usd", 100, Some("stablecoins"))?;
+    println!();
+    println!("/// Coins pegged to a currency, which `coins top` shows in grey:");
+    println!("/// they are dollars in another wrapper, not price action.");
+    println!("pub const STABLECOINS: &[&str] = &[");
+    for m in &stable {
+        println!("    {:?},", m.id.trim());
     }
     println!("];");
     Ok(())

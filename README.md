@@ -78,6 +78,7 @@ inline_plot = false                    # add a sparkline to the right of every r
 show_addresses = false                 # let plain `coins` show holdings too
 balance     = "all"                    # `coins balance`: all | addresses
 height      = 14                       # chart height, in terminal rows
+top         = 50                       # rows in `coins top`, 1 to 50
 thousands   = " "                      # digit grouping: " " | "," | "." | ""
 max_decimals = 3                       # ceiling on price decimals
 theme       = "dark"                   # dark | light
@@ -140,10 +141,24 @@ says `7d` rather than claiming the range.
 
 `coins top` ranks those fifty by market capitalisation — circulating supply times
 price, which is what makes a coin large. Not by price per unit, which says only how
-finely a supply was divided: XRP at €1.16 is worth more than BNB at €592. It shows
-the periods the prices request answers, so like the coins themselves it costs no
-request; `coins top 10` shortens it. Which fifty they are is fixed by the built-in
-list and refreshed with it, so the membership is a snapshot while the order is live.
+finely a supply was divided: XRP at €1.16 is worth more than BNB at €592. The `#` is
+the coin's place in the whole market, so a coin of yours from further down appears
+below the rest at its own rank rather than at the end of the queue:
+
+```
+    7  ● SOL   Solana        €85.976      €50.3B  ▼0.1%  ▲1.4%  ▲35.1%  ▼52.0%
+
+  174  ● STRK  Starknet       €0.023       €165M  ▼0.2%  ▲4.8%   ▲7.5%  ▼78.5%
+```
+
+Your own coins keep their colour, pegged coins are greyed — they are dollars in
+another wrapper, not price action — and everything else is plain. `coins top 10`
+shortens the list for one run; `top` in the config sets it for good. Like the coins
+themselves the screen costs no request, which is why it shows only the periods the
+prices carry: a `3m` or `6m` column is a chart per coin, and fifty of those is not a
+screen worth paying for. Which fifty they are comes from the built-in list, so
+membership is a snapshot while the order is live — a `#57` inside the list is the
+sign to regenerate it.
 
 Charts are cached in `~/.cache/coins` for five minutes to a day, depending on how
 fast the period moves. The top line always states the age of what you are looking at,
