@@ -76,7 +76,10 @@ _coins() {
   # A word being typed as a flag. Without this, `--ref<TAB>` does nothing at all,
   # which reads as broken completion rather than as "there is nothing there".
   if [[ $cur == -* ]]; then
-    _values $nocase 'option' \
+    # `--label` belongs to `add` alone, so it is offered only there.
+    local -a extra
+    [[ $words[2] == add ]] && extra=('-l[name this address]' '--label[name this address]')
+    _values $nocase 'option' $extra \
       '-c[quote in this currency]' '--currency[quote in this currency]' \
       '-r[timeframe: 1d 1w 1m 3m 6m 1y all]' '--range[timeframe: 1d 1w 1m 3m 6m 1y all]' \
       '--no-plot[leave the plots out]' '--refresh[ignore the cache and fetch now]' \
@@ -163,7 +166,12 @@ _coins() {
   esac
 
   if [[ $cur == -* ]]; then
-    _coins_offer "-c
+    # `--label` belongs to `add` alone, so it is offered only there.
+    local label=""
+    [ "${COMP_WORDS[1]}" = "add" ] && label="-l
+--label"
+    _coins_offer "$label
+-c
 --currency
 -r
 --range

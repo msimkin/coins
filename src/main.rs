@@ -63,6 +63,9 @@ enum Command {
     Add {
         #[arg(required = true, value_name = "COIN|ADDRESS")]
         what: Vec<String>,
+        /// Name the address in the ADDRESSES group, instead of `wallet`
+        #[arg(long, short = 'l', value_name = "NAME")]
+        label: Option<String>,
     },
     /// Stop tracking a coin or an address
     Rm {
@@ -157,7 +160,7 @@ fn run() -> Result<()> {
             screen(cfg, &cli, &theme, View::Plot, coin.clone())
         }
         Some(Command::Balance) => screen(cfg, &cli, &theme, View::Balance, None),
-        Some(Command::Add { what }) => add(&cfg, what, &theme),
+        Some(Command::Add { what, label }) => add(&cfg, what, label.as_deref(), &theme),
         Some(Command::Rm { what }) => remove(&cfg, what),
         Some(Command::Config { .. }) => Ok(()), // handled before the config is read
         None => {
@@ -204,17 +207,28 @@ fn screen(
 
 /// `add` takes a coin or a wallet — an address is unmistakable by shape, so one
 /// command covers both without a second one to remember.
-fn add(cfg: &Config, what: &[String], theme: &Theme) -> Result<()> {
+fn add(cfg: &Config, what: &[String], label: Option<&str>, theme: &Theme) -> Result<()> {
+    // A label names one address. Which of several it belonged to would be a
+    // guess, and a wrong guess writes itself into the config.
+    if label.is_some() && what.len() > 1 {
+        bail!("`--label` names one address at a time");
+    }
+    if let (Some(l), [item]) = (label, what) {
+        if !config::is_wallet_address(item) {
+            bail!("`--label` names an address, and {item:?} is a coin — {l:?} has nothing to name");
+        }
+    }
     let fetcher = Fetcher::new(cfg.clone(), false)?;
     for item in what {
         if config::is_wallet_address(item) {
             let address = item.trim();
             let chain = config::Chain::detect(address).unwrap_or(config::Chain::Ethereum);
-            if config::add_wallet(address, None)? {
+            if config::add_wallet(address, label)? {
                 println!(
-                    "added {} wallet {}",
+                    "added {} wallet {}{}",
                     chain.name(),
-                    wallet::short_address(address)
+                    wallet::short_address(address),
+                    label.map(|l| format!(" as {l:?}")).unwrap_or_default()
                 );
                 // The chain's own coin, without which the wallet would be read
                 // and then have nowhere to appear.

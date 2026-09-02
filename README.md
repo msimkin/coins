@@ -47,7 +47,8 @@ coins config --edit   # open the config in $EDITOR
 ```
 
 Any unambiguous prefix works: `coins b` is `coins balance`, `coins p` is `coins
-plot`. `-c eur` and `-r 1m` change the currency and the period for one run.
+plot`. `-c eur` and `-r 1m` change the currency and the period for one run, and
+`coins add 0xd8dA… --label trezor` names an address in the ADDRESSES group.
 
 `add` takes only an exact match on id, ticker or name, so a typo cannot quietly
 become a coin you did not mean:
@@ -102,7 +103,9 @@ Two sources, which add up: `[holdings]` in the config, for coins held somewhere
 without an address, and `coins add <address>` for balances read from the chain. The
 chain follows from the address — `0x` and 40 hex digits is Ethereum, 43–44 base58
 characters is Solana — and one address holds the chain's own coin plus any token you
-track, so the group has a row per holding rather than per address.
+track, so the group has a row per holding rather than per address. A Solana address's
+stake accounts are counted with its liquid SOL; ether staked in a validator is not
+visible from an address at all, though a liquid-staking token is, once you track it.
 
 <img src="docs/balance.png" width="724" alt="The balance view: coins, then addresses with amounts, a total and an allocation bar">
 
