@@ -7,17 +7,17 @@
 Cryptocurrency prices, charts and holdings in your terminal. Prices come from
 [CoinGecko](https://docs.coingecko.com), quoted directly in your own currency.
 
-<img src="docs/market.png" width="568" alt="Three coins with their price and the change over 1h, 24h, 30 days, 6 months and a year">
+<img src="docs/market.png" width="724" alt="Three coins with their price and the change over 1h, 24h, 30 days, 6 months and a year">
 
 One row per coin: the price, then a change column for every period you name.
 
 `coins plot` draws the charts, as many to a row as the terminal fits:
 
-<img src="docs/plot.png" width="701" alt="Four charts in a two-by-two grid: BTC, ETH, SOL and STRK over a month">
+<img src="docs/plot.png" width="724" alt="Four charts in a two-by-two grid: BTC, ETH, SOL and STRK over a month">
 
 `coins eth` draws one of them alone:
 
-<img src="docs/eth.png" width="631" alt="One full-width chart of ETH over a month">
+<img src="docs/eth.png" width="724" alt="One full-width chart of ETH over a month">
 
 Curves are braille dots, 2×4 to a character cell, so they stay smooth at any width.
 
@@ -104,7 +104,7 @@ chain follows from the address — `0x` and 40 hex digits is Ethereum, 43–44 b
 characters is Solana — and one address holds the chain's own coin plus any token you
 track, so the group has a row per holding rather than per address.
 
-<img src="docs/balance.png" width="631" alt="The balance view: coins, then addresses with amounts, a total and an allocation bar">
+<img src="docs/balance.png" width="724" alt="The balance view: coins, then addresses with amounts, a total and an allocation bar">
 
 The addresses and amounts above are made up.
 

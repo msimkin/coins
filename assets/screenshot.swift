@@ -5,7 +5,7 @@
 // monospaced font, so what the README shows is what the terminal shows.
 //
 //     CLICOLOR_FORCE=1 COLORTERM=truecolor COINS_WIDTH=78 coins > /tmp/out.txt
-//     swift assets/screenshot.swift /tmp/out.txt docs/market.png
+//     swift assets/screenshot.swift /tmp/out.txt docs/market.png 88
 //
 // Only the escapes theme.rs emits are understood: truecolor foregrounds, bold, and
 // the resets for each.
@@ -13,6 +13,10 @@ import AppKit
 
 let inPath  = CommandLine.arguments[1]
 let outPath = CommandLine.arguments[2]
+// A window this many columns wide, whatever the output happens to fill. Every
+// screenshot on the page is padded to the same number, so left-aligned they line
+// up on both edges instead of stepping in and out with their content.
+let minCols = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3])! : 0
 // The dark surface the palette was validated against, and its default ink.
 let ground = NSColor(srgbRed: 0.102, green: 0.102, blue: 0.098, alpha: 1)
 let ink    = NSColor(srgbRed: 0.898, green: 0.894, blue: 0.867, alpha: 1)
@@ -80,7 +84,7 @@ let cellW = ("M" as NSString).size(withAttributes: [.font: font]).width
 let lineH = (font.ascender - font.descender + font.leading).rounded()
 let pad = 18 * scale
 
-let cols = parsed.map { $0.reduce(0) { $0 + $1.text.count } }.max() ?? 0
+let cols = max(parsed.map { $0.reduce(0) { $0 + $1.text.count } }.max() ?? 0, minCols)
 let W = Int((CGFloat(cols) * cellW + 2*pad).rounded())
 let H = Int((CGFloat(lines.count) * lineH + 2*pad).rounded())
 
