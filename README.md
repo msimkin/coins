@@ -1,4 +1,4 @@
-<img src="docs/icon.png" width="64" alt="">
+<div align="right"><img src="docs/icon.png" width="64" alt=""></div>
 
 # coins
 
