@@ -13,11 +13,12 @@ const TEMPLATE: &str = r#"# coins — terminal crypto dashboard.
 # `coins config --sync` adds any option a newer version introduced.
 
 coins          = ["bitcoin", "ethereum"]   # tracked coins; order fixes each coin's colour
-currency       = "usd"      # any CoinGecko vs_currency: usd, eur, dkk, gbp, btc, ...
+currency       = "usd"      # any CoinGecko vs_currency: usd, eur, gbp, jpy, btc, ...
 range          = "1w"       # period the plots and the last change column cover:
                             # 1d | 1w | 1m | 3m | 6m | 1y | all
 columns        = ["1h", "24h", "7d"]       # change columns, left to right, from
-                            # 1h 24h 7d 14d 30d 200d 1y
+                            # 1h 24h 7d 14d 30d 3m 6m 200d 1y — 3m and 6m each
+                            # cost one cached chart per coin, the rest are free
 
 inline_plot    = true       # the small price plot on the right of each coin's row
                             # in `price`; false leaves the rows as numbers only
@@ -99,16 +100,15 @@ impl Range {
         }
     }
 
-    /// Short form, in the same vocabulary as the change columns — those are
-    /// named after CoinGecko's own periods (`1h`, `24h`, `7d`, `30d`, `1y`), so
-    /// a month has to read `30D` here too rather than `1M`.
+    /// Short form, in the same vocabulary as the change columns, so a period
+    /// reads the same wherever it appears.
     pub fn short(self) -> &'static str {
         match self {
             Range::D1 => "24H",
             Range::W1 => "7D",
             Range::M1 => "30D",
-            Range::M3 => "90D",
-            Range::M6 => "180D",
+            Range::M3 => "3M",
+            Range::M6 => "6M",
             Range::Y1 => "1Y",
             Range::All => "ALL",
         }
@@ -258,8 +258,20 @@ pub struct Config {
     pub wallets: Vec<Wallet>,
 }
 
-/// Change columns we know how to ask CoinGecko for.
-pub const CHANGE_COLUMNS: &[&str] = &["1h", "24h", "7d", "14d", "30d", "200d", "1y"];
+/// Change columns CoinGecko's markets endpoint answers directly, in one request
+/// with the prices.
+pub const MARKET_COLUMNS: &[&str] = &["1h", "24h", "7d", "14d", "30d", "200d", "1y"];
+
+/// Change columns worked out from a price chart instead, with the days of chart
+/// each one needs. CoinGecko has no month-length period of its own, so a `6m`
+/// column is the change across a 180-day chart — one request per coin, cached
+/// for hours, and shared between these columns because the longest chart
+/// contains the shorter ones.
+pub const SERIES_COLUMNS: &[(&str, i64)] = &[("3m", 90), ("6m", 180)];
+
+/// Every column a config may name, in period order.
+pub const CHANGE_COLUMNS: &[&str] =
+    &["1h", "24h", "7d", "14d", "30d", "3m", "6m", "200d", "1y"];
 
 impl Config {
     pub fn path() -> Result<PathBuf> {
@@ -352,13 +364,39 @@ impl Config {
         Ok((cfg, created))
     }
 
-    /// The change columns, in config order, that CoinGecko can supply.
+    /// The change columns, in config order, that this build can fill.
     pub fn change_columns(&self) -> Vec<&str> {
         self.columns
             .iter()
             .map(|s| s.as_str())
             .filter(|c| CHANGE_COLUMNS.contains(c))
             .collect()
+    }
+
+    /// Those of them the prices request carries. The rest need a chart, so they
+    /// must not be asked of `/coins/markets`, which rejects a period it does
+    /// not know.
+    pub fn market_columns(&self) -> Vec<&str> {
+        self.change_columns()
+            .into_iter()
+            .filter(|c| MARKET_COLUMNS.contains(c))
+            .collect()
+    }
+
+    /// Those of them worked out from a chart, with the days each needs.
+    pub fn series_columns(&self) -> Vec<(&'static str, i64)> {
+        SERIES_COLUMNS
+            .iter()
+            .copied()
+            .filter(|(name, _)| self.columns.iter().any(|c| c == name))
+            .collect()
+    }
+
+    /// The one chart that covers every month column asked for: the longest of
+    /// them, since a 180-day chart already contains the last 90 days.
+    pub fn month_chart_range(&self) -> Option<Range> {
+        let days = self.series_columns().iter().map(|(_, d)| *d).max()?;
+        Some(if days > 90 { Range::M6 } else { Range::M3 })
     }
 
     /// Every coin to price: the tracked ones, plus anything held.
@@ -700,6 +738,19 @@ mod template_tests {
 
     /// Every option the loader accepts must appear in the template with a note
     /// beside it, or it is an option nobody can discover.
+    #[test]
+    fn every_column_has_exactly_one_source() {
+        for c in CHANGE_COLUMNS {
+            let market = MARKET_COLUMNS.contains(c);
+            let series = SERIES_COLUMNS.iter().any(|(n, _)| n == c);
+            assert!(market || series, "{c} is offered but nothing can fill it");
+            assert!(!(market && series), "{c} would be fetched twice");
+        }
+        // The shared chart must cover the longest month column.
+        let longest = SERIES_COLUMNS.iter().map(|(_, d)| *d).max().unwrap();
+        assert!(longest <= 180, "a month column longer than the 6m chart");
+    }
+
     #[test]
     fn the_template_names_the_binary() {
         // The header greets the user with the command they typed; a rename that

@@ -260,7 +260,7 @@ fn coins_section(
             Some(p) => Cell::Bold(fmt::money_with(p, &snap.currency, decimals)),
             None => Cell::Dim("·".into()),
         });
-        cells.extend(changes.iter().map(|c| delta_cell(m.change(c))));
+        cells.extend(changes.iter().map(|c| delta_cell(row.change(c))));
 
         let mut tail = Vec::new();
         if trend_cells > 0 {
@@ -324,7 +324,7 @@ fn holdings_section(
         )));
         // A holding's amount is fixed over the period, so its change is its
         // coin's change — the same figure, in the same column.
-        cells.extend(changes.iter().map(|c| delta_cell(m.change(c))));
+        cells.extend(changes.iter().map(|c| delta_cell(row.change(c))));
 
         rows.push(cells);
         tail_rows.push(vec![
@@ -387,7 +387,7 @@ fn weighted_change(snap: &Snapshot, holdings: &[Holding<'_>], column: &str) -> O
             .rows
             .iter()
             .find(|r| &r.market.id == *id)
-            .and_then(|r| r.market.change(column))
+            .and_then(|r| r.change(column))
             .filter(|c| c.is_finite());
         if let Some(c) = change {
             sum += value * c;

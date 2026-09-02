@@ -40,6 +40,18 @@ pub struct Row {
     pub series: Option<Series>,
     /// Units held, from `[holdings]` and any wallets.
     pub amount: f64,
+    /// Changes worked out from a chart rather than supplied with the price —
+    /// the month columns, keyed by column name.
+    pub changes: BTreeMap<String, f64>,
+}
+
+impl Row {
+    /// A column's change, wherever it came from.
+    pub fn change(&self, column: &str) -> Option<f64> {
+        self.market
+            .change(column)
+            .or_else(|| self.changes.get(column).copied())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,12 +266,12 @@ impl Fetcher {
     }
 
     fn markets_key(&self) -> String {
-        format!("markets-{}-{}", self.cfg.currency, self.cfg.change_columns().join("_"))
+        format!("markets-{}-{}", self.cfg.currency, self.cfg.market_columns().join("_"))
     }
 
     fn markets(&self, ids: &[String]) -> (Vec<Market>, Duration, Status) {
         let key = self.markets_key();
-        let changes = self.cfg.change_columns();
+        let changes = self.cfg.market_columns();
         let fetch = || self.api.markets(ids, &self.cfg.currency, &changes);
 
         let cached = if self.force { None } else { self.cache.get::<Vec<Market>>(&key) };
@@ -301,14 +313,20 @@ impl Fetcher {
     }
 
     fn series(&self, id: &str) -> Option<Series> {
-        let key = format!("chart-{id}-{}-{}", self.cfg.currency, self.cfg.range.key());
-        let ttl = self.cfg.range.chart_ttl();
+        self.series_over(id, self.cfg.range)
+    }
+
+    /// The price chart for one coin over `range`. Keyed by range, so a month
+    /// column and a plot of the same period share the one request.
+    fn series_over(&self, id: &str, range: Range) -> Option<Series> {
+        let key = format!("chart-{id}-{}-{}", self.cfg.currency, range.key());
+        let ttl = range.chart_ttl();
         if !self.force {
             if let Some(v) = self.cache.get_fresh::<Series>(&key, ttl) {
                 return Some(v);
             }
         }
-        match self.api.market_chart(id, &self.cfg.currency, self.cfg.range.days()) {
+        match self.api.market_chart(id, &self.cfg.currency, range.days()) {
             Ok(v) => {
                 self.cache.put(&key, &v);
                 Some(v)
@@ -407,6 +425,23 @@ impl Fetcher {
         }
     }
 
+    /// Fills the month columns, which no single request can answer: one chart
+    /// per coin, the longest period asked for, sliced for the shorter ones.
+    fn attach_month_changes(&self, rows: &mut [Row]) {
+        let columns = self.cfg.series_columns();
+        let Some(range) = self.cfg.month_chart_range() else { return };
+        // Same ceiling as the inline plots: past it, a screen would cost more
+        // requests than the keyless allowance gives in a minute.
+        for row in rows.iter_mut().take(MAX_INLINE_SERIES) {
+            let Some(series) = self.series_over(&row.market.id, range) else { continue };
+            for (column, days) in &columns {
+                if let Some(v) = change_over_days(&series, *days) {
+                    row.changes.insert((*column).to_string(), v);
+                }
+            }
+        }
+    }
+
     /// The screen `view` asked for, narrowed to one coin when `focus` is set.
     pub fn snapshot(
         &self,
@@ -486,6 +521,7 @@ impl Fetcher {
             charted.clone()
         };
         self.attach_series(&mut rows, &want_series);
+        self.attach_month_changes(&mut rows);
 
         // Each source is valued on its own, so it can have its own group of rows.
         let mut sources: Vec<HoldingSource> = per_wallet
@@ -685,13 +721,23 @@ impl Fetcher {
     /// `coins __warm`: refresh the cache quietly for the next invocation.
     pub fn warm(&self) -> Result<()> {
         let ids = self.cfg.quoted_coins();
-        let changes = self.cfg.change_columns();
+        let changes = self.cfg.market_columns();
         let markets = self.api.markets(&ids, &self.cfg.currency, &changes)?;
         self.cache.put(&self.markets_key(), &markets);
         // Balances too, so a run with wallets doesn't block on the chain.
         if !self.cfg.wallets.is_empty() {
             let mut ignored = Vec::new();
             let _ = self.wallet_amounts(&ids, &mut ignored);
+        }
+        // The month columns need a chart of their own, on the same ceiling the
+        // screen uses.
+        if let Some(range) = self.cfg.month_chart_range() {
+            for id in self.cfg.coins.iter().take(MAX_INLINE_SERIES) {
+                let key = format!("chart-{id}-{}-{}", self.cfg.currency, range.key());
+                if let Ok(v) = self.api.market_chart(id, &self.cfg.currency, range.days()) {
+                    self.cache.put(&key, &v);
+                }
+            }
         }
         // The 1-week series rides along with the prices request; other ranges
         // need one call per coin, which is exactly what a background warm is for.
@@ -739,6 +785,17 @@ pub const COMMON_CURRENCIES: &[&str] = &[
 ];
 
 /// One row per coin to display, coloured by its place in that order.
+/// Percentage change across the last `days` of a chart. The window is measured
+/// back from the chart's own last point rather than from the clock, because the
+/// history lags the live quote by up to an hour.
+fn change_over_days(series: &Series, days: i64) -> Option<f64> {
+    let (last_at, last) = *series.last()?;
+    let cutoff = last_at - days * 86_400_000;
+    let (_, first) = *series.iter().find(|(at, _)| *at >= cutoff)?;
+    (first.is_finite() && first > 0.0 && last.is_finite())
+        .then(|| (last - first) / first * 100.0)
+}
+
 fn build_rows(
     display: &[String],
     markets: &[Market],
@@ -762,6 +819,7 @@ fn build_rows(
                 color,
                 series: None,
                 amount: amounts.get(id).copied().unwrap_or(0.0),
+                changes: BTreeMap::new(),
             })
         })
         .collect()
@@ -857,6 +915,27 @@ fn plan_chart(view: View, focused: bool, count: usize) -> (ChartPlan, Vec<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_month_change_is_measured_from_the_chart_end() {
+        let day = 86_400_000i64;
+        // 120 daily points, ending at day 0, rising 1 per day from 100.
+        let series: Series = (0..120).map(|i| (-(119 - i) * day, 100.0 + i as f64)).collect();
+        // 90 days back is the point at index 29, worth 129.
+        let m3 = change_over_days(&series, 90).unwrap();
+        assert!((m3 - (219.0 - 129.0) / 129.0 * 100.0).abs() < 1e-9, "{m3}");
+        // A window longer than the chart uses everything it has, rather than
+        // reporting nothing at all.
+        let all = change_over_days(&series, 365).unwrap();
+        assert!((all - 119.0).abs() < 1e-9, "{all}");
+    }
+
+    #[test]
+    fn a_flat_or_empty_chart_yields_no_change() {
+        assert_eq!(change_over_days(&Vec::new(), 90), None);
+        let zeros: Series = vec![(0, 0.0), (86_400_000, 1.0)];
+        assert_eq!(change_over_days(&zeros, 1), None, "a zero start has no percentage");
+    }
 
     #[test]
     fn the_table_views_draw_no_big_chart() {
