@@ -14,16 +14,20 @@ const TEMPLATE: &str = r#"# coins — terminal crypto dashboard.
 
 coins          = ["bitcoin", "ethereum"]   # tracked coins; order fixes each coin's colour
 currency       = "usd"      # any CoinGecko vs_currency: usd, eur, gbp, jpy, btc, ...
-range          = "1w"       # period the plots and the last change column cover:
-                            # 1d | 1w | 1m | 3m | 6m | 1y | all
+range          = "1w"       # how much history a chart covers: `coins plot`, the
+                            # sparklines, and the change shown beside each coin
+                            # there. One of 1d | 1w | 1m | 3m | 6m | 1y | all
 columns        = ["1h", "24h", "7d"]       # change columns, left to right, from
                             # 1h 24h 7d 14d 30d 3m 6m 200d 1y — 3m and 6m each
                             # cost one cached chart per coin, the rest are free
 
-inline_plot    = true       # the small price plot on the right of each coin's row
-                            # in `price`; false leaves the rows as numbers only
-show_addresses = false      # whether plain `price` also shows what you hold;
+inline_plot    = false      # add a small sparkline to the right of every row;
+                            # off leaves the table as numbers only
+show_addresses = false      # whether plain `coins` also shows what you hold;
                             # `coins balance` shows it either way
+balance        = "all"      # what `coins balance` shows: all (prices and what
+                            # you hold) | addresses (only what you hold, so the
+                            # two commands divide the screen between them)
 height         = 14         # height of a `coins plot` chart, in terminal rows
 
 thousands      = " "        # digit grouping in prices: " " | "," | "." | ""
@@ -177,10 +181,12 @@ struct Raw {
     range: String,
     #[serde(default = "default_height")]
     height: usize,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     inline_plot: bool,
     #[serde(default)]
     show_addresses: bool,
+    #[serde(default = "default_balance")]
+    balance: String,
     #[serde(default = "default_thousands")]
     thousands: String,
     #[serde(default = "default_max_decimals")]
@@ -224,8 +230,8 @@ fn default_max_decimals() -> usize {
 fn default_height() -> usize {
     14
 }
-fn default_true() -> bool {
-    true
+fn default_balance() -> String {
+    "all".into()
 }
 fn default_columns() -> Vec<String> {
     vec!["1h".into(), "24h".into(), "7d".into()]
@@ -245,6 +251,7 @@ pub struct Config {
     /// glancing at prices with someone beside you does not put your portfolio
     /// on the screen; `coins balance` shows it when you want it.
     pub show_addresses: bool,
+    pub balance: BalanceView,
     /// Digit-group separator for prices. A space by default: "," and "." each
     /// mean the decimal point to half the world, so "$2,372" gets misread.
     pub thousands: String,
@@ -345,6 +352,7 @@ impl Config {
             height: raw.height.clamp(4, 60),
             inline_plot: raw.inline_plot,
             show_addresses: raw.show_addresses,
+            balance: BalanceView::parse(&raw.balance)?,
             thousands: raw.thousands.clone(),
             max_decimals: raw.max_decimals.min(10),
             columns: raw.columns.iter().map(|c| c.to_ascii_lowercase()).collect(),
@@ -423,7 +431,27 @@ impl Config {
     }
 }
 
-/// The chains whose balances `price` can read.
+/// What `coins balance` puts on the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BalanceView {
+    /// Prices and holdings together.
+    All,
+    /// Only what you hold, so `coins` and `coins balance` divide the screen
+    /// between them rather than one repeating the other.
+    Addresses,
+}
+
+impl BalanceView {
+    fn parse(s: &str) -> Result<BalanceView> {
+        Ok(match s.trim().to_ascii_lowercase().as_str() {
+            "all" | "both" => BalanceView::All,
+            "addresses" | "holdings" => BalanceView::Addresses,
+            other => bail!("unknown balance {other:?} — it is `all` or `addresses`"),
+        })
+    }
+}
+
+/// The chains whose balances `coins` can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chain {
     Ethereum,
@@ -767,6 +795,7 @@ mod template_tests {
             "columns",
             "inline_plot",
             "show_addresses",
+            "balance",
             "height",
             "thousands",
             "max_decimals",
@@ -797,7 +826,7 @@ mod template_tests {
         assert_eq!(raw.thousands, " ");
         assert_eq!(raw.max_decimals, 3);
         assert!(!raw.show_addresses);
-        assert!(raw.inline_plot);
+        assert!(!raw.inline_plot);
     }
 
     #[test]

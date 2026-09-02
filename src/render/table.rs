@@ -106,7 +106,7 @@ pub fn table(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> Rend
                 // Only the coin rows carry a plot, so its budget is what is
                 // left on *their* line — the address columns no longer compete
                 // for the same space.
-                let plot = if cfg.inline_plot {
+                let plot = if cfg.inline_plot && snap.show_coins {
                     width.saturating_sub(m.coins + 2).min(MAX_PLOT)
                 } else {
                     0
@@ -442,9 +442,12 @@ fn build(
             .map(|(_, id, amount)| amount * price_of(snap, id)),
     );
 
-    let mut sections = vec![coins_section(
-        snap, cfg, style, trend_cells, col_two, decimals,
-    )];
+    let mut sections = Vec::new();
+    if snap.show_coins {
+        sections.push(coins_section(
+            snap, cfg, style, trend_cells, col_two, decimals,
+        ));
+    }
     if let Some(section) = holdings_section(snap, cfg, style, &holdings, col_two, values) {
         sections.push(section);
     }

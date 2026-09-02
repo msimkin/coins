@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use crate::cache::{Cache, WARM_WINDOW};
 use crate::coingecko::{Api, Market, SearchCoin, Series, is_rate_limit, sparkline_series};
 use crate::coins;
-use crate::config::{Chain, Config, Range};
+use crate::config::{BalanceView, Chain, Config, Range};
 use crate::portfolio::{self, HoldingSource, Portfolio};
 use crate::wallet::Rpc;
 
@@ -93,6 +93,9 @@ pub struct Snapshot {
     pub show_table: bool,
     /// Whether the addresses group appears under the table.
     pub show_addresses: bool,
+    /// Whether the coins group appears at all. `balance = "addresses"` turns it
+    /// off for that view, so the two commands divide the screen between them.
+    pub show_coins: bool,
     /// Rows to chart, as indices into `rows`.
     pub charted: Vec<usize>,
     pub age: Duration,
@@ -500,6 +503,13 @@ impl Fetcher {
             bail!("nothing to show — add a coin with `coins add bitcoin`");
         }
 
+        // `balance = "addresses"` drops the coin table from this view, but only
+        // when there is something held to put in its place: an empty screen
+        // would be a worse answer than a repeated one.
+        let show_coins = !(view == View::Balance
+            && self.cfg.balance == BalanceView::Addresses
+            && rows.iter().any(|r| r.amount > 0.0));
+
         // Which coins get a chart, and which need price history at all.
         let (plan, charted) = plan_chart(view, focus_id.is_some(), rows.len());
         if plan == ChartPlan::Facets && charted.len() < rows.len() {
@@ -556,6 +566,7 @@ impl Fetcher {
             plan,
             show_table: plan == ChartPlan::Off,
             show_addresses,
+            show_coins,
             charted,
             age,
             status,
