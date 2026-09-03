@@ -81,6 +81,9 @@ found it. A refresh that fails does not clear the screen: the last frame stays, 
 a line saying what happened and when the next attempt is, and the age in the header
 keeps climbing.
 
+The frame is centred on the screen in live mode, since a display has no prompt to
+sit under.
+
 For a machine that boots into it — a Raspberry Pi wired to a small screen — that is
 the whole setup, plus `setterm -cursor off` to hide the cursor and an autologin
 shell or a systemd unit to start it.
@@ -181,6 +184,15 @@ prices carry: a `3m` or `6m` column is a chart per coin, and fifty of those is n
 screen worth paying for. Which fifty they are comes from the built-in list, so
 membership is a snapshot while the order is live — a `#57` inside the list is the
 sign to regenerate it.
+
+**A screen goes up before any request is made.** It is drawn from the last data on
+disk and replaced when fresh data arrives, so a slow connection costs a redraw
+rather than a blank terminal: `coins plot` with stale prices and stale charts used
+to sit empty for as long as four requests took, and now shows the old charts at
+once. Within an hour of a cached picture nothing is fetched in the foreground at
+all — the screen is drawn from the cache, its header says how old it is, and a
+background refresh makes the next run current. `--refresh` skips all of that, which
+is what it is for.
 
 Charts are cached in `~/.cache/coins` for five minutes to a day, depending on how
 fast the period moves. The top line always states the age of what you are looking at,

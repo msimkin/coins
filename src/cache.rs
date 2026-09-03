@@ -11,7 +11,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Below this age we refresh in the background instead of blocking on it.
-pub const WARM_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// How long a warm-lock is honoured before we assume the warmer died.
 const LOCK_TTL: Duration = Duration::from_secs(60);
 

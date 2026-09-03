@@ -20,6 +20,43 @@ const MAX_WIDTH: usize = 128;
 const MAX_CHART_WIDTH: usize = 208;
 
 /// The whole screen, as lines ready to print.
+/// A frame placed in the middle of the screen rather than in its corner.
+///
+/// For a display on a wall: the content is untouched, only where it sits. A frame
+/// with more lines than the screen has rows, or wider than it is, simply starts at
+/// the top left — there is nothing to centre it in.
+pub fn centre(lines: &[String], cols: usize, rows: usize) -> Vec<String> {
+    let widest = lines.iter().map(|l| vis_width(&braille::strip_ansi(l))).max().unwrap_or(0);
+    let left = " ".repeat(cols.saturating_sub(widest) / 2);
+    let top = rows.saturating_sub(lines.len()) / 2;
+    let mut out = vec![String::new(); top];
+    out.extend(lines.iter().map(|l| {
+        if l.is_empty() { String::new() } else { format!("{left}{l}") }
+    }));
+    out
+}
+
+/// Rewrites the lines just printed, in place, without touching anything above
+/// them.
+///
+/// A command run at a prompt does not own the screen — the frames above it are
+/// somebody's shell session — so the second paint walks back up over exactly what
+/// the first one printed rather than homing the cursor. Each line erases what it
+/// lands on and the tail is cleared, so a second frame may be shorter than the
+/// first without leaving a stub behind.
+pub fn redraw(lines: &[String], over: usize) -> String {
+    let mut out = String::new();
+    if over > 0 {
+        out.push_str(&format!("\x1b[{over}A"));
+    }
+    for line in lines {
+        out.push_str(line);
+        out.push_str("\x1b[K\n");
+    }
+    out.push_str("\x1b[J");
+    out
+}
+
 /// One frame, ready to write over the last one.
 ///
 /// Home the cursor, then erase each line as it is written rather than clearing
@@ -508,7 +545,45 @@ fn allocation_bar(
 
 #[cfg(test)]
 mod repaint_tests {
-    use super::repaint;
+    use super::{centre, repaint};
+
+    #[test]
+    fn a_second_paint_at_a_prompt_walks_back_over_the_first() {
+        let lines = vec!["a".to_string(), "b".to_string()];
+        // The first paint is a plain print: nothing above it is touched.
+        let first = super::redraw(&lines, 0);
+        assert!(!first.contains("\x1b[H"), "{first:?}");
+        assert!(!first.contains('A'), "nothing to walk back over yet: {first:?}");
+        // The second walks up exactly as far as the first one printed.
+        let second = super::redraw(&lines, 2);
+        assert!(second.starts_with("\x1b[2A"), "{second:?}");
+        assert!(second.ends_with("\x1b[J"), "a shorter frame must clear the tail");
+    }
+
+    #[test]
+    fn a_frame_sits_in_the_middle_of_the_screen() {
+        let frame = vec!["abc".to_string(), "de".to_string()];
+        // Four rows of slack above and below, six columns either side.
+        let out = centre(&frame, 15, 10);
+        assert_eq!(out.len(), 4 + 2, "{out:?}");
+        assert!(out[..4].iter().all(|l| l.is_empty()), "{out:?}");
+        assert_eq!(out[4], "      abc");
+        // Every line shifts by the same amount, or the block would be ragged.
+        assert_eq!(out[5], "      de");
+    }
+
+    #[test]
+    fn an_odd_gap_leans_up_and_left() {
+        let out = centre(&["ab".to_string()], 5, 4);
+        assert_eq!(out, vec!["".to_string(), " ab".to_string()]);
+    }
+
+    #[test]
+    fn a_frame_too_big_for_the_screen_starts_in_the_corner() {
+        let frame = vec!["a very wide line indeed".to_string(), "x".to_string()];
+        let out = centre(&frame, 10, 1);
+        assert_eq!(out, frame, "{out:?}");
+    }
 
     #[test]
     fn a_frame_erases_what_the_last_one_left() {

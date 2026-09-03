@@ -281,6 +281,18 @@ pub fn vis_width(s: &str) -> usize {
     s.chars().count()
 }
 
+/// The terminal, in characters. `$COINS_WIDTH` and `$COINS_HEIGHT` stand in
+/// where there is no terminal to measure.
+pub fn term_size() -> (usize, usize) {
+    let rows = std::env::var("COINS_HEIGHT")
+        .ok()
+        .and_then(|h| h.trim().parse::<usize>().ok())
+        .or_else(|| terminal_size::terminal_size().map(|(_, terminal_size::Height(h))| h as usize))
+        .filter(|h| *h >= 4)
+        .unwrap_or(24);
+    (term_width(), rows)
+}
+
 pub fn term_width() -> usize {
     // $COINS_WIDTH is the escape hatch for piping into a pager or a file,
     // where there is no terminal to measure.

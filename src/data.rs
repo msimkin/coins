@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cache::{Cache, WARM_WINDOW};
+use crate::cache::Cache;
 use crate::coingecko::{Api, Market, SearchCoin, Series, is_rate_limit, sparkline_series};
 use crate::coins;
 use crate::config::{BalanceView, Chain, Config, Range};
@@ -25,6 +25,39 @@ const MARKETS_TTL: Duration = Duration::from_secs(60);
 /// them current, so this can be generous.
 const WALLET_TTL: Duration = Duration::from_secs(5 * 60);
 const META_TTL: Duration = Duration::from_secs(30 * 86_400);
+/// A cached picture younger than this is worth drawing at once and refreshing
+/// behind: an hour-old price on the screen now beats a current one in fifteen
+/// seconds, and the header says how old it is either way.
+const STALE_LIMIT: Duration = Duration::from_secs(3600);
+
+/// How far a snapshot may go for its data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Whatever is on disk, however old, and no requests at all. The first paint
+    /// of a screen is drawn this way, so that something is up immediately.
+    Cache,
+    /// Requests only for what is missing. Anything cached is good enough, however
+    /// stale, because a warmer is bringing it up to date — this is what stops a
+    /// chart past its six hours from blocking a screen for fifteen seconds.
+    Gaps,
+    /// Refetch anything past its age.
+    Fresh,
+}
+
+/// Which of those to use, given how old the prices on disk are.
+///
+/// A live display refreshes itself, so it always reaches for fresh data and never
+/// leaves a warmer to do it. Everything else would rather draw an hour-old
+/// picture now and be current next time.
+fn reach_for(age: Option<Duration>, force: bool, live: bool) -> Reach {
+    match age {
+        _ if force => Reach::Fresh,
+        Some(age) if age < MARKETS_TTL => Reach::Gaps,
+        Some(age) if age < STALE_LIMIT && !live => Reach::Gaps,
+        _ => Reach::Fresh,
+    }
+}
+
 /// How many of the built-in popular coins ride along with every prices request,
 /// history and all, so that any of them can be shown and plotted without one.
 /// Fifty is the trade: each coin's week of history is about 3 KB, so fifty cost
@@ -135,6 +168,8 @@ impl Snapshot {
 
 pub struct Fetcher {
     pub cfg: Config,
+    /// How far this snapshot may go for its data.
+    reach: Reach,
     /// A display that redraws on its own schedule. It refreshes what it needs
     /// itself, so nothing is gained by spawning a warmer — and a warmer spawned
     /// once a minute by a process that never exits is a defunct child once a
@@ -150,7 +185,7 @@ impl Fetcher {
     pub fn new(cfg: Config, force: bool) -> Result<Fetcher> {
         let api = Api::new(&cfg.api_key);
         let cache = Cache::new(crate::config::cache_home()?);
-        Ok(Fetcher { cfg, api, cache, force, live: false })
+        Ok(Fetcher { cfg, api, cache, force, live: false, reach: Reach::Fresh })
     }
 
     /// A display refreshes itself, so it warms nothing and forces nothing after
@@ -162,6 +197,26 @@ impl Fetcher {
 
     pub fn stop_forcing(&mut self) {
         self.force = false;
+    }
+
+    /// The age of the prices on disk, which is what decides how far to reach.
+    fn cached_age(&self) -> Option<Duration> {
+        self.cache.get::<Vec<Market>>(&self.markets_key()).map(|h| h.age)
+    }
+
+    /// Sets the reach for what follows, and returns it. `Cache` is left alone —
+    /// the first paint asks for exactly that.
+    fn decide_reach(&mut self, reach: Option<Reach>) -> Reach {
+        self.reach = match reach {
+            Some(r) => r,
+            None => reach_for(self.cached_age(), self.force, self.live),
+        };
+        // Stale data on the screen is only acceptable because something is on its
+        // way to replace it.
+        if self.reach == Reach::Gaps && !self.live {
+            self.cache.spawn_warm();
+        }
+        self.reach
     }
 
     /// Checks the configured display currency against CoinGecko's list.
@@ -347,10 +402,14 @@ impl Fetcher {
             if complete && hit.age < MARKETS_TTL {
                 return (hit.value, hit.age, Status::Fresh);
             }
-            if complete && hit.age < WARM_WINDOW && !self.live {
-                // Show what we have now; make the next run fresh.
-                self.cache.spawn_warm();
+            // Cached and complete is as far as `Cache` and `Gaps` go: the first
+            // is drawing what is already here, and the second has a warmer on
+            // the way. `Warming` is what puts `refreshing` in the header.
+            if complete && self.reach != Reach::Fresh {
                 return (hit.value, hit.age, Status::Warming);
+            }
+            if self.reach == Reach::Cache {
+                return (hit.value, hit.age, Status::Offline);
             }
             return match fetch() {
                 Ok(v) => {
@@ -362,6 +421,11 @@ impl Fetcher {
                     (hit.value, hit.age, status)
                 }
             };
+        }
+        // Nothing cached at all: even the first paint has to give up here, and
+        // it does so without a request, so the screen is simply not drawn yet.
+        if self.reach == Reach::Cache {
+            return (Vec::new(), Duration::ZERO, Status::Offline);
         }
         match fetch() {
             Ok(v) => {
@@ -390,6 +454,16 @@ impl Fetcher {
             if let Some(v) = self.cache.get_fresh::<Series>(&key, ttl) {
                 return Some(v);
             }
+            // Past its age, but there: fifteen seconds of blank screen is a
+            // worse answer than a chart that is a few hours old and labelled.
+            if self.reach != Reach::Fresh {
+                if let Some(hit) = self.cache.get::<Series>(&key) {
+                    return Some(hit.value);
+                }
+            }
+        }
+        if self.reach == Reach::Cache {
+            return None;
         }
         match self.api.market_chart(id, &self.cfg.currency, range.days()) {
             Ok(v) => {
@@ -528,7 +602,34 @@ impl Fetcher {
     }
 
     /// The screen `view` asked for, narrowed to one coin when `focus` is set.
+    /// The screen, reaching as far for its data as the state of the cache says
+    /// it should — and starting a warmer when it settles for something stale.
     pub fn snapshot(
+        &mut self,
+        focus: Option<&str>,
+        view: View,
+        inline_plots: bool,
+        top_count: Option<usize>,
+    ) -> Result<Snapshot> {
+        self.decide_reach(None);
+        self.build(focus, view, inline_plots, top_count)
+    }
+
+    /// The screen from what is already on disk, and nothing else. This is the
+    /// paint that goes up immediately, before a single request is made; it fails
+    /// quietly when there is not enough cached to draw anything.
+    pub fn cached_snapshot(
+        &mut self,
+        focus: Option<&str>,
+        view: View,
+        inline_plots: bool,
+        top_count: Option<usize>,
+    ) -> Result<Snapshot> {
+        self.decide_reach(Some(Reach::Cache));
+        self.build(focus, view, inline_plots, top_count)
+    }
+
+    fn build(
         &self,
         focus: Option<&str>,
         view: View,
@@ -784,6 +885,16 @@ impl Fetcher {
             if let Some(v) = self.cache.get_fresh::<f64>(key, WALLET_TTL) {
                 return Ok(v);
             }
+            if self.reach != Reach::Fresh {
+                if let Some(hit) = self.cache.get::<f64>(key) {
+                    return Ok(hit.value);
+                }
+            }
+        }
+        if self.reach == Reach::Cache {
+            // No chain call from a first paint: an address with nothing cached
+            // simply has no figure yet.
+            return Ok(0.0);
         }
         match fetch() {
             Ok(v) => {
@@ -1133,6 +1244,22 @@ mod tests {
             "id": id, "symbol": id, "name": id, "market_cap": cap, "market_cap_rank": rank
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn how_far_to_reach_depends_on_what_is_on_disk() {
+        let m = |s| Some(Duration::from_secs(s));
+        // Current: nothing to fetch either way.
+        assert_eq!(reach_for(m(30), false, false), Reach::Gaps);
+        // Stale but recent: draw it now, refresh behind — a display instead does
+        // the refreshing itself, so it reaches for fresh data every tick.
+        assert_eq!(reach_for(m(600), false, false), Reach::Gaps);
+        assert_eq!(reach_for(m(600), false, true), Reach::Fresh);
+        // Past the hour, or nothing at all: worth waiting for.
+        assert_eq!(reach_for(m(3601), false, false), Reach::Fresh);
+        assert_eq!(reach_for(None, false, false), Reach::Fresh);
+        // `--refresh` means what it says, whatever the cache holds.
+        assert_eq!(reach_for(m(30), true, false), Reach::Fresh);
     }
 
     #[test]

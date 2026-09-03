@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 
 use config::Config;
 use data::{Fetcher, Match, View};
-use render::theme::{ColorLevel, Theme, term_width};
+use render::theme::{ColorLevel, Theme, term_size, term_width};
 
 #[derive(Parser)]
 #[command(
@@ -212,21 +212,54 @@ fn screen(
     }
     let inline_plots = cfg.inline_plot && !cli.no_plot;
     let interval = cfg.live;
-    let fetcher = Fetcher::new(cfg, cli.refresh)?;
+    let mut fetcher = Fetcher::new(cfg, cli.refresh)?;
     // Once, whatever happens next: a currency the API cannot quote is not a
     // thing that comes right on the next tick.
     fetcher.validate_currency()?;
 
-    if !cli.live {
-        let snap = fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count)?;
-        for line in render::screen(&snap, &fetcher.cfg, theme, term_width()) {
-            println!("{line}");
-        }
-        // A blank line, so the next prompt is not flush against the table.
-        println!();
-        return Ok(());
+    if cli.live {
+        return live(fetcher, theme, view, coin, top_count, inline_plots, interval);
     }
-    live(fetcher, theme, view, coin, top_count, inline_plots, interval)
+
+    // What is on disk goes up first, before a single request. On a good
+    // connection the two frames are identical and only one is ever seen; on a
+    // bad one this is the difference between reading hour-old prices now and
+    // watching a blank terminal for fifteen seconds a coin.
+    //
+    // Only when it fits on the screen: the second paint walks the cursor back up
+    // over the first, and a frame that scrolled cannot be walked back over.
+    let (_, rows) = term_size();
+    let mut painted: Option<Vec<String>> = None;
+    if std::io::stdout().is_terminal() {
+        if let Ok(snap) = fetcher.cached_snapshot(coin.as_deref(), view, inline_plots, top_count) {
+            let lines = render::screen(&snap, &fetcher.cfg, theme, term_width());
+            if lines.len() + 2 < rows {
+                print!("{}", render::redraw(&lines, 0));
+                std::io::stdout().flush()?;
+                painted = Some(lines);
+            }
+        }
+    }
+
+    let snap = fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count)?;
+    let lines = render::screen(&snap, &fetcher.cfg, theme, term_width());
+    match painted {
+        // Nothing has changed, so nothing is redrawn: no flicker for the
+        // overwhelmingly common case of a cache that was already current.
+        Some(first) if first == lines => {}
+        Some(first) => {
+            print!("{}", render::redraw(&lines, first.len()));
+            std::io::stdout().flush()?;
+        }
+        None => {
+            for line in &lines {
+                println!("{line}");
+            }
+        }
+    }
+    // A blank line, so the next prompt is not flush against the table.
+    println!();
+    Ok(())
 }
 
 /// Redraws the screen every `interval` until interrupted.
@@ -255,8 +288,30 @@ fn live(
     let mut last: Vec<String> = Vec::new();
     let mut next = Instant::now();
     loop {
+        // The cache goes up first here too, so a tick that has to wait on the
+        // network shows the last known screen rather than freezing on the one
+        // before it — for a display, a frame that never blanks is the point.
+        let (cols, rows) = term_size();
+        if let Ok(snap) = fetcher.cached_snapshot(coin.as_deref(), view, inline_plots, top_count) {
+            let lines = render::centre(
+                &render::screen(&snap, &fetcher.cfg, theme, cols),
+                cols,
+                rows,
+            );
+            if lines != last {
+                write!(out, "{}", render::repaint(&lines))?;
+                out.flush()?;
+                last = lines;
+            }
+        }
         match fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count) {
-            Ok(snap) => last = render::screen(&snap, &fetcher.cfg, theme, term_width()),
+            Ok(snap) => {
+                last = render::centre(
+                    &render::screen(&snap, &fetcher.cfg, theme, cols),
+                    cols,
+                    rows,
+                )
+            }
             // A display does not go out because the network did. The last frame
             // stands, with a line under it saying what happened — and the age in
             // its header keeps climbing, which is the honest part.
