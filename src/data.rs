@@ -598,6 +598,71 @@ impl Fetcher {
         }
     }
 
+    /// The coins this screen shows, in the order it shows them — and, for the
+    /// market list, where its ranked coins end and yours begin.
+    ///
+    /// What each view is for: plain `coins` shows exactly what you track,
+    /// predictably and without hinting at holdings; the balance view adds every
+    /// coin you hold, so one is never invisible merely because it is not in
+    /// `coins`; and the market list is the market, whatever the config says
+    /// about holdings.
+    fn on_screen(
+        &self,
+        view: View,
+        focus: Option<&String>,
+        markets: &[Market],
+        top_count: Option<usize>,
+        show_addresses: bool,
+    ) -> (Vec<String>, Option<usize>) {
+        match focus {
+            Some(f) => (vec![f.clone()], None),
+            None if view == View::Top => {
+                market_list(markets, &self.cfg.coins, top_count.unwrap_or(self.cfg.top))
+            }
+            None if show_addresses => (self.cfg.quoted_coins(), None),
+            None => (self.cfg.coins.clone(), None),
+        }
+    }
+
+    /// Everything about history in one place: which coins get a chart, which get
+    /// any series at all, and the series themselves.
+    fn attach_history(
+        &self,
+        rows: &mut [Row],
+        view: View,
+        focused: bool,
+        inline_plots: bool,
+        warnings: &mut Vec<String>,
+    ) -> (ChartPlan, Vec<usize>) {
+        let (plan, charted) = plan_chart(view, focused, rows.len());
+        if plan == ChartPlan::Facets && charted.len() < rows.len() {
+            warnings.push(format!(
+                "plotting the first {} of {} coins — each one costs a request",
+                charted.len(),
+                rows.len()
+            ));
+        }
+        let want: Vec<usize> = if plan == ChartPlan::Off {
+            // The list view's per-row plots need history for every row, but not
+            // at the price of a request each once the list gets long.
+            if inline_plots && rows.len() <= MAX_INLINE_SERIES {
+                (0..rows.len()).collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            charted.clone()
+        };
+        self.attach_series(rows, &want);
+        // Not for the market list: a month column is a chart per coin, and that
+        // screen's whole point is that it costs nothing. It shows the columns
+        // the prices request already answers.
+        if view != View::Top {
+            self.attach_month_changes(rows);
+        }
+        (plan, charted)
+    }
+
     /// Fills the month columns, which no single request can answer: one chart
     /// per coin, the longest period asked for, sliced for the shorter ones.
     fn attach_month_changes(&self, rows: &mut [Row]) {
@@ -674,27 +739,10 @@ impl Fetcher {
         }
         let mut warnings = self.price_warnings(&ids, &markets, status);
 
-        // What each view is for: plain `price` shows exactly what you track,
-        // predictably and without hinting at holdings; the holdings view adds
-        // every coin you hold, so one is never invisible merely because it is
-        // not in `coins`.
-        // `coins top` is about the market, so it says nothing about holdings
-        // however the config is set: a list of the largest coins is a thing you
-        // can show someone.
         let show_addresses =
             view != View::Top && (view == View::Balance || self.cfg.show_addresses);
-        let mut top_break = None;
-        let display: Vec<String> = match &focus_id {
-            Some(f) => vec![f.clone()],
-            None if view == View::Top => {
-                let (ids, at) =
-                    market_list(&markets, &self.cfg.coins, top_count.unwrap_or(self.cfg.top));
-                top_break = at;
-                ids
-            }
-            None if show_addresses => self.cfg.quoted_coins(),
-            None => self.cfg.coins.clone(),
-        };
+        let (display, top_break) =
+            self.on_screen(view, focus_id.as_ref(), &markets, top_count, show_addresses);
 
         // Wallet warnings are kept apart, so a private screen says nothing
         // about your wallets.
@@ -717,33 +765,8 @@ impl Fetcher {
             && self.cfg.balance == BalanceView::Addresses
             && rows.iter().any(|r| r.amount > 0.0));
 
-        // Which coins get a chart, and which need price history at all.
-        let (plan, charted) = plan_chart(view, focus_id.is_some(), rows.len());
-        if plan == ChartPlan::Facets && charted.len() < rows.len() {
-            warnings.push(format!(
-                "plotting the first {} of {} coins — each one costs a request",
-                charted.len(),
-                rows.len()
-            ));
-        }
-        let want_series: Vec<usize> = if plan == ChartPlan::Off {
-            // The list view's per-row plots need history for every row, but not
-            // at the price of a request each once the list gets long.
-            if inline_plots && rows.len() <= MAX_INLINE_SERIES {
-                (0..rows.len()).collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            charted.clone()
-        };
-        self.attach_series(&mut rows, &want_series);
-        // Not for the market list: a month column is a chart per coin, and this
-        // screen's whole point is that it costs nothing. It shows the columns
-        // the prices request already answers.
-        if view != View::Top {
-            self.attach_month_changes(&mut rows);
-        }
+        let (plan, charted) =
+            self.attach_history(&mut rows, view, focus_id.is_some(), inline_plots, &mut warnings);
 
         // Each source is valued on its own, so it can have its own group of rows.
         let mut sources: Vec<HoldingSource> = per_wallet
@@ -811,77 +834,31 @@ impl Fetcher {
         }
 
         let mut out: Vec<WalletBalances> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
         for wallet in &self.cfg.wallets {
+            // The same address twice would be read twice and counted twice, and
+            // a portfolio quietly worth double is the worst kind of wrong number.
+            let lower = wallet.address.trim().to_ascii_lowercase();
+            if seen.contains(&lower) {
+                warnings.push(format!(
+                    "{} is listed twice — counted once",
+                    crate::wallet::short_address(&wallet.address)
+                ));
+                continue;
+            }
+            seen.push(lower);
             let label = wallet.label.clone().unwrap_or_else(|| "wallet".to_string());
             // An address this build cannot read is reported here rather than
             // refused at load time, which would take every command down.
             let Some(chain) = wallet.chain() else {
                 warnings.push(format!(
-                    "{label}: {} is not an address price can read — it expects an Ethereum address (0x + 40 hex) or a Solana address (43-44 base58)",
+                    "{label}: {} is not an address coins can read — it expects an Ethereum address (0x + 40 hex) or a Solana address (43-44 base58)",
                     crate::wallet::short_address(&wallet.address)
                 ));
                 continue;
             };
-            let addr = wallet.address.to_ascii_lowercase();
-            let mut amounts: BTreeMap<String, f64> = BTreeMap::new();
-            let rpc = Rpc::new(chain, wallet.rpc.as_deref());
-
-            // The chain's own currency, which every address on it can hold.
-            let native = chain.native_coin();
-            if ids.iter().any(|i| i == native) {
-                let key = format!("wallet-{}-{addr}-{native}", chain.name());
-                match self.cached_balance(&key, || rpc.native_balance(&wallet.address)) {
-                    Ok(v) => *amounts.entry(native.to_string()).or_insert(0.0) += v,
-                    // `{:#}` so the cause is shown: the outermost context is
-                    // only "via <endpoint>", which says nothing on its own.
-                    Err(e) => warnings.push(format!("{label}: {e:#}")),
-                }
-                // Staked SOL sits in accounts of its own, which `getBalance`
-                // does not count. Left out, an address that stakes reads low
-                // and says nothing about it.
-                if chain == Chain::Solana {
-                    let key = format!("stake-{addr}");
-                    match self.cached_balance(&key, || rpc.staked_balance(&wallet.address)) {
-                        Ok(v) if v > 0.0 => {
-                            *amounts.entry(native.to_string()).or_insert(0.0) += v
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warnings.push(format!("{label}: staked SOL not counted — {e:#}"))
-                        }
-                    }
-                }
-            }
-
             let map = tokens.iter().find(|(c, _)| *c == chain).map(|(_, m)| m);
-            for (id, token) in map.into_iter().flatten() {
-                // Ethereum needs the token's own decimals; a Solana token
-                // account reports an amount that is already scaled.
-                let decimals = match chain {
-                    Chain::Ethereum => {
-                        let dec_key = format!("decimals-{token}");
-                        match self.cache.get_fresh::<u32>(&dec_key, META_TTL) {
-                            Some(d) => d,
-                            None => match rpc.token_decimals(token) {
-                                Ok(d) => {
-                                    self.cache.put(&dec_key, &d);
-                                    d
-                                }
-                                Err(_) => 18,
-                            },
-                        }
-                    }
-                    Chain::Solana => 0,
-                };
-                let key = format!("wallet-{}-{addr}-{id}", chain.name());
-                match self.cached_balance(&key, || {
-                    rpc.token_balance(&wallet.address, token, decimals)
-                }) {
-                    Ok(v) if v > 0.0 => *amounts.entry(id.clone()).or_insert(0.0) += v,
-                    Ok(_) => {}
-                    Err(e) => warnings.push(format!("{label} / {id}: {e:#}")),
-                }
-            }
+            let amounts = self.one_wallet(wallet, chain, &label, ids, map, warnings);
             out.push(WalletBalances {
                 label,
                 address: wallet.address.clone(),
@@ -889,6 +866,79 @@ impl Fetcher {
             });
         }
         out
+    }
+
+    /// What one address holds, of the coins asked for: the chain's own currency,
+    /// its stake if it has any, and each tracked token on it.
+    fn one_wallet(
+        &self,
+        wallet: &crate::config::Wallet,
+        chain: Chain,
+        label: &str,
+        ids: &[String],
+        tokens: Option<&BTreeMap<String, String>>,
+        warnings: &mut Vec<String>,
+    ) -> BTreeMap<String, f64> {
+        let addr = wallet.address.to_ascii_lowercase();
+        let mut amounts: BTreeMap<String, f64> = BTreeMap::new();
+        let rpc = Rpc::new(chain, wallet.rpc.as_deref());
+
+        // The chain's own currency, which every address on it can hold.
+        let native = chain.native_coin();
+        if ids.iter().any(|i| i == native) {
+            let key = format!("wallet-{}-{addr}-{native}", chain.name());
+            match self.cached_balance(&key, || rpc.native_balance(&wallet.address)) {
+                Ok(v) => *amounts.entry(native.to_string()).or_insert(0.0) += v,
+                // `{:#}` so the cause is shown: the outermost context is
+                // only "via <endpoint>", which says nothing on its own.
+                Err(e) => warnings.push(format!("{label}: {e:#}")),
+            }
+            // Staked SOL sits in accounts of its own, which `getBalance`
+            // does not count. Left out, an address that stakes reads low
+            // and says nothing about it.
+            if chain == Chain::Solana {
+                let key = format!("stake-{addr}");
+                match self.cached_balance(&key, || rpc.staked_balance(&wallet.address)) {
+                    Ok(v) if v > 0.0 => {
+                        *amounts.entry(native.to_string()).or_insert(0.0) += v
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warnings.push(format!("{label}: staked SOL not counted — {e:#}"))
+                    }
+                }
+            }
+        }
+
+        for (id, token) in tokens.into_iter().flatten() {
+            // Ethereum needs the token's own decimals; a Solana token
+            // account reports an amount that is already scaled.
+            let decimals = match chain {
+                Chain::Ethereum => {
+                    let dec_key = format!("decimals-{token}");
+                    match self.cache.get_fresh::<u32>(&dec_key, META_TTL) {
+                        Some(d) => d,
+                        None => match rpc.token_decimals(token) {
+                            Ok(d) => {
+                                self.cache.put(&dec_key, &d);
+                                d
+                            }
+                            Err(_) => 18,
+                        },
+                    }
+                }
+                Chain::Solana => 0,
+            };
+            let key = format!("wallet-{}-{addr}-{id}", chain.name());
+            match self.cached_balance(&key, || {
+                rpc.token_balance(&wallet.address, token, decimals)
+            }) {
+                Ok(v) if v > 0.0 => *amounts.entry(id.clone()).or_insert(0.0) += v,
+                Ok(_) => {}
+                Err(e) => warnings.push(format!("{label} / {id}: {e:#}")),
+            }
+        }
+        amounts
     }
 
     fn cached_balance<F>(&self, key: &str, fetch: F) -> Result<f64>
