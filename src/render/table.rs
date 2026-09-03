@@ -105,6 +105,32 @@ pub struct Rendered {
 
 /// Renders the table. The per-row plot takes whatever width the other columns
 /// leave, so it grows with the terminal instead of sitting at a fixed size.
+/// The styles to try, most complete first.
+///
+/// Dropping the address rows is only a step when there is a coins group to fall
+/// back on: `balance = "addresses"` is a screen made of those rows, and a screen
+/// made of nothing is not a narrower version of it.
+fn ladder(show_coins: bool) -> Vec<Style> {
+    let with = |with_name, tight, with_amounts| Style {
+        with_name,
+        name_cap: None,
+        tight,
+        with_amounts,
+        with_addresses: true,
+    };
+    let mut out = vec![
+        with(true, false, true),
+        with(false, false, true),
+        with(false, true, true),
+        with(false, true, false),
+    ];
+    if show_coins {
+        out.push(Style { with_addresses: false, ..with(true, false, true) });
+        out.push(Style { with_addresses: false, ..with(false, false, true) });
+    }
+    out
+}
+
 /// The narrowest a name column is worth having. Below this it says nothing that
 /// the ticker beside it has not already said.
 const MIN_NAME: usize = 6;
@@ -115,7 +141,13 @@ const MIN_NAME: usize = 6;
 /// capped, so the long ones end in `…` and the rest are untouched; or no column
 /// at all, when so little is left that most names would be stumps.
 fn name_style(snap: &Snapshot, cfg: &Config, width: usize) -> Style {
-    let bare = Style { with_name: false, name_cap: None, tight: false, with_addresses: false };
+    let bare = Style {
+        with_name: false,
+        name_cap: None,
+        tight: false,
+        with_amounts: false,
+        with_addresses: false,
+    };
     let lengths: Vec<usize> = snap
         .rows
         .iter()
@@ -155,14 +187,12 @@ pub fn table(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> Rend
     if snap.view == View::Top {
         return emitted(snap, cfg, theme, name_style(snap, cfg, width), 0);
     }
-    // Degrade in order of what the screen is for. The address rows outrank the
-    // coin's full name and the plot, but they add two columns, so on a narrow
-    // terminal they go compact and then go entirely rather than overflow.
-    for with_addresses in [true, false] {
-        let tights: &[bool] = if with_addresses { &[false, true] } else { &[false] };
-        for &tight in tights {
-            for with_name in [true, false] {
-                let style = Style { with_name, name_cap: None, tight, with_addresses };
+    // Degrade in the order of what the screen is for, and take the first that
+    // fits. The address rows outrank the coin's full name; their own columns —
+    // the amount and the address — outrank nothing, so they go first of all.
+    for style in ladder(snap.show_coins) {
+        {
+            {
                 let m = measure(snap, cfg, style);
                 if m.widest > width {
                     continue;
@@ -180,8 +210,12 @@ pub fn table(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> Rend
             }
         }
     }
-    // Nothing fits: the prices matter more than the terminal's feelings.
-    emitted(snap, cfg, theme, Style::bare(), 0)
+    // Nothing fits: the figures matter more than the terminal's feelings. The
+    // last rung of the ladder is used rather than a bare style, because with
+    // `balance = "addresses"` a bare style has no group left to draw and the
+    // screen came out empty — a rule and nothing under it.
+    let last = ladder(snap.show_coins).pop().unwrap_or_else(Style::bare);
+    emitted(snap, cfg, theme, last, 0)
 }
 
 fn emitted(
@@ -252,12 +286,22 @@ struct Style {
     /// Shorter wallet labels and coarser amounts, to keep the address rows on
     /// a narrow terminal instead of dropping them.
     tight: bool,
+    /// The holdings group's own columns — how much, and which address. The
+    /// widest part of that row and the first of it to go, since what a holding
+    /// is worth is the headline and the rest is detail.
+    with_amounts: bool,
     with_addresses: bool,
 }
 
 impl Style {
     fn bare() -> Style {
-        Style { with_name: false, name_cap: None, tight: true, with_addresses: false }
+        Style {
+            with_name: false,
+            name_cap: None,
+            tight: true,
+            with_amounts: false,
+            with_addresses: false,
+        }
     }
 }
 
@@ -529,9 +573,17 @@ fn holdings_section(
         header,
         align: vec![None; 3 + changes.len()],
         rows,
-        tail_header: vec!["AMOUNT".into(), "ADDRESS".into()],
-        tail_align: vec![Align::Right, Align::Left],
-        tail_rows,
+        tail_header: if style.with_amounts {
+            vec!["AMOUNT".into(), "ADDRESS".into()]
+        } else {
+            Vec::new()
+        },
+        tail_align: if style.with_amounts {
+            vec![Align::Right, Align::Left]
+        } else {
+            Vec::new()
+        },
+        tail_rows: if style.with_amounts { tail_rows } else { Vec::new() },
         rule,
     })
 }
@@ -760,6 +812,21 @@ fn pad_cell(line: &mut SLine, text: &str, painted: String, width: usize, align: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_screen_made_of_addresses_never_gives_them_up() {
+        // `balance = "addresses"` has no coins group to fall back on, so every
+        // rung of its ladder must keep the address rows. Dropping them left a
+        // rule with nothing under it, at any width below a hundred columns.
+        let rungs = ladder(false);
+        assert!(!rungs.is_empty());
+        assert!(rungs.iter().all(|s| s.with_addresses), "{rungs:?}");
+        // The amount and the address go first, and only then would the rows.
+        assert!(rungs.iter().any(|s| !s.with_amounts));
+        // With a coins group there is something to fall back to, so the last
+        // rungs may leave the addresses out.
+        assert!(ladder(true).iter().any(|s| !s.with_addresses));
+    }
 
     #[test]
     fn names_are_kept_whole_cut_or_dropped_by_the_room_there_is() {
