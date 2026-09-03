@@ -267,8 +267,24 @@ fn encode(s: &str) -> String {
 
 /// `sparkline_in_7d` has no timestamps — it is hourly and ends at `last_updated`,
 /// so we can reconstruct them and use it as a 7-day series for free.
+/// The week of history that rides along with the prices, in the currency that was
+/// asked for.
+///
+/// `sparkline_in_7d` comes back in dollars whatever `vs_currency` says — not
+/// documented anywhere, and invisible until you draw it: in euros the curve sat
+/// 16% above the quote beside it, and appending the live price put a cliff on the
+/// end of every week-long chart. So the week is pinned to the quote: scaled by
+/// the ratio between them, which is the exchange rate and whatever the coin did
+/// since its last point, and which is 1.0 when the currency already is dollars.
+/// The shape is untouched — it is one multiplier — and the curve now ends where
+/// the price says it ends.
 pub fn sparkline_series(m: &Market) -> Option<Series> {
-    let prices = m.sparkline_in_7d.as_ref()?.price.clone();
+    let raw = &m.sparkline_in_7d.as_ref()?.price;
+    let factor = match (m.current_price, raw.last()) {
+        (Some(now), Some(&last)) if now > 0.0 && last > 0.0 && now.is_finite() => now / last,
+        _ => 1.0,
+    };
+    let prices: Vec<f64> = raw.iter().map(|p| p * factor).collect();
     if prices.len() < 2 {
         return None;
     }
@@ -287,4 +303,41 @@ pub fn sparkline_series(m: &Market) -> Option<Series> {
             .map(|(i, p)| (end_ms - (n - 1 - i as i64) * step, p))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_sparkline(prices: Vec<f64>, quote: f64) -> Market {
+        let mut m: Market = serde_json::from_value(serde_json::json!({
+            "id": "x", "symbol": "x", "name": "x",
+            "current_price": quote,
+            "last_updated": "2026-09-02T12:00:00.000Z",
+        }))
+        .unwrap();
+        m.sparkline_in_7d = Some(Sparkline { price: prices });
+        m
+    }
+
+    #[test]
+    fn a_week_of_history_is_pinned_to_the_price_beside_it() {
+        // What the API actually returns for a euro request: dollars.
+        let m = with_sparkline(vec![100.0, 110.0, 105.0, 116.0], 100.0);
+        let s = sparkline_series(&m).unwrap();
+        // It ends where the quote says, so appending the quote cannot make a cliff.
+        assert!((s.last().unwrap().1 - 100.0).abs() < 1e-9);
+        // And the shape is untouched: every ratio between points is what it was.
+        let v: Vec<f64> = s.iter().map(|(_, p)| *p).collect();
+        assert!((v[1] / v[0] - 1.10).abs() < 1e-9, "{v:?}");
+        assert!((v[2] / v[1] - 105.0 / 110.0).abs() < 1e-9, "{v:?}");
+    }
+
+    #[test]
+    fn a_coin_without_a_quote_is_left_as_it_came() {
+        let mut m = with_sparkline(vec![1.0, 2.0], 1.0);
+        m.current_price = None;
+        let s = sparkline_series(&m).unwrap();
+        assert_eq!(s.iter().map(|(_, p)| *p).collect::<Vec<_>>(), vec![1.0, 2.0]);
+    }
 }
