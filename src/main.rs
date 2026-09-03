@@ -19,7 +19,12 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use config::Config;
-use data::{Fetcher, Match, View};
+
+/// How often a live display looks to see whether the window has changed shape.
+/// One `ioctl` and a comparison, so the cost of asking is nothing next to a
+/// screen that stays wrong until the next refresh.
+const RESIZE_POLL: Duration = Duration::from_millis(250);
+use data::{Fetcher, Match, Snapshot, View};
 use render::theme::{ColorLevel, Theme, term_size, term_width};
 
 #[derive(Parser)]
@@ -294,12 +299,14 @@ fn live(
     fetcher.set_live();
     let mut out = std::io::stdout().lock();
     let mut last: Vec<String> = Vec::new();
+    let mut shown: Option<Snapshot> = None;
+    let mut size = term_size();
     let mut next = Instant::now();
     loop {
         // The cache goes up first here too, so a tick that has to wait on the
         // network shows the last known screen rather than freezing on the one
         // before it — for a display, a frame that never blanks is the point.
-        let (cols, rows) = term_size();
+        let (cols, rows) = size;
         if let Ok(snap) = fetcher.cached_snapshot(coin.as_deref(), view, inline_plots, top_count) {
             let lines = render::centre(
                 &render::screen(&snap, &fetcher.cfg, theme, cols),
@@ -311,6 +318,7 @@ fn live(
                 out.flush()?;
                 last = lines;
             }
+            shown = Some(snap);
         }
         match fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count) {
             Ok(snap) => {
@@ -318,7 +326,8 @@ fn live(
                     &render::screen(&snap, &fetcher.cfg, theme, cols),
                     cols,
                     rows,
-                )
+                );
+                shown = Some(snap);
             }
             // A display does not go out because the network did. The last frame
             // stands, with a line under it saying what happened — and the age in
@@ -341,7 +350,29 @@ fn live(
         // Measured from the last wake rather than from now, so a slow fetch does
         // not walk the clock forward a little on every tick.
         next += interval;
-        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        // Waiting is done in slices, because a frame is sized to the terminal
+        // and a resize makes it wrong the instant it happens. Sleeping straight
+        // through the interval left a display mis-shaped for up to a minute; a
+        // check every quarter second costs one `ioctl` and redraws from the
+        // snapshot in hand, without a request.
+        while Instant::now() < next {
+            let left = next.saturating_duration_since(Instant::now());
+            std::thread::sleep(RESIZE_POLL.min(left));
+            let now = term_size();
+            if now == size {
+                continue;
+            }
+            size = now;
+            if let Some(snap) = &shown {
+                last = render::centre(
+                    &render::screen(snap, &fetcher.cfg, theme, size.0),
+                    size.0,
+                    size.1,
+                );
+                write!(out, "{}", render::repaint(&last))?;
+                out.flush()?;
+            }
+        }
         // `--refresh` is for the frame you asked for, not for every frame from
         // now until the machine is switched off.
         fetcher.stop_forcing();

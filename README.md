@@ -82,7 +82,8 @@ a line saying what happened and when the next attempt is, and the age in the hea
 keeps climbing.
 
 The frame is centred on the screen in live mode, since a display has no prompt to
-sit under.
+sit under, and it follows the window: resizing redraws within a quarter second
+rather than waiting for the next refresh.
 
 For a machine that boots into it — a Raspberry Pi wired to a small screen — that is
 the whole setup, plus `setterm -cursor off` to hide the cursor and an autologin
