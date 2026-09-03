@@ -684,10 +684,23 @@ fn build(
 
 /// Cuts a label to `max` characters, marking where it was cut.
 fn shorten(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if vis_width(text) <= max {
         return text.to_string();
     }
-    let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+    // Columns, not characters: nine characters of a name written in a script
+    // whose characters are two columns wide is eighteen columns, and the cut is
+    // there to make something fit.
+    let room = max.saturating_sub(1);
+    let mut kept = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = crate::render::theme::char_width(c);
+        if used + w > room {
+            break;
+        }
+        kept.push(c);
+        used += w;
+    }
     format!("{kept}…")
 }
 
@@ -812,6 +825,19 @@ fn pad_cell(line: &mut SLine, text: &str, painted: String, width: usize, align: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cut_name_fits_the_columns_it_was_given() {
+        use crate::render::theme::vis_width;
+        // Plain text is cut to the count, as it always was.
+        assert_eq!(shorten("Hyperliquid", 8), "Hyperli…");
+        assert_eq!(shorten("Solana", 8), "Solana");
+        // A name in two-column characters is cut to *columns*: nine characters
+        // of it would have been eighteen columns and overflowed the row.
+        let cut = shorten("币安人生 (BinanceLife)", 9);
+        assert!(vis_width(&cut) <= 9, "{cut:?} is {} columns", vis_width(&cut));
+        assert!(cut.ends_with('…'));
+    }
 
     #[test]
     fn a_screen_made_of_addresses_never_gives_them_up() {

@@ -390,17 +390,17 @@ fn title_width(
     with_price: bool,
     with_change: bool,
 ) -> usize {
-    let mut n = gutter + 1 + 2 + row.market.ticker().chars().count();
+    let mut n = gutter + 1 + 2 + vis_width(&row.market.ticker());
     if with_price {
         if let Some(p) = row.market.current_price {
-            n += 2 + fmt::money(p, &snap.currency).chars().count();
+            n += 2 + vis_width(&fmt::money(p, &snap.currency));
         }
     }
     if with_change {
         if let Some(v) = row.series.as_deref().and_then(change_over) {
-            n += 2 + fmt::percent(v).chars().count();
+            n += 2 + vis_width(&fmt::percent(v));
             if with_period {
-                n += snap.range.short().chars().count() + 3; // " (…)"
+                n += vis_width(snap.range.short()) + 3; // " (…)"
             }
         }
     }

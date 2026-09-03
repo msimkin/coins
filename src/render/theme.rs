@@ -278,7 +278,53 @@ impl SLine {
 /// Every glyph this tool prints (braille, blocks, box-drawing, ●▲▼…, currency
 /// symbols) is single-width, so counting characters is the right measure.
 pub fn vis_width(s: &str) -> usize {
-    s.chars().count()
+    s.chars().map(char_width).sum()
+}
+
+/// The columns one character occupies.
+///
+/// Not one each: a CJK ideograph takes two and a combining mark takes none. One
+/// of the built-in coins is called `币安人生 (BinanceLife)` — eighteen characters,
+/// twenty-two columns — and counting characters put every column to its right
+/// four places out of line, which is the same failure the zero-width characters
+/// in `fmt::clean_text` were found to cause.
+///
+/// The ranges are the wide and zero-width blocks that turn up in a coin's name
+/// or a wallet's label: the East Asian planes, the fullwidth forms, emoji, and
+/// the combining marks. An approximation of UAX #11 rather than a table of it —
+/// the alternative is a dependency to line up a column. Everything the tool
+/// draws itself (`●`, `▲`, `─`, `┤`, the braille and block glyphs, `€`) is one
+/// column and stays that way.
+pub fn char_width(c: char) -> usize {
+    match c as u32 {
+        // Drawn on top of what precedes them.
+        0x0300..=0x036F
+        | 0x0483..=0x0489
+        | 0x0591..=0x05BD
+        | 0x0610..=0x061A
+        | 0x064B..=0x065F
+        | 0x0E34..=0x0E3A
+        | 0x1AB0..=0x1AFF
+        | 0x20D0..=0x20F0
+        | 0xFE00..=0xFE0F
+        | 0xFE20..=0xFE2F => 0,
+        // Two columns wide.
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F9FF
+        | 0x1FA70..=0x1FAFF
+        | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
 }
 
 /// The terminal, in characters. `$COINS_WIDTH` and `$COINS_HEIGHT` stand in
@@ -305,4 +351,33 @@ pub fn term_width() -> usize {
         .map(|(terminal_size::Width(w), _)| w as usize)
         .filter(|w| *w >= 40)
         .unwrap_or(80)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{char_width, vis_width};
+
+    #[test]
+    fn width_is_columns_not_characters() {
+        assert_eq!(vis_width("Ethereum"), 8);
+        // The coin that found this: eighteen characters, twenty-two columns.
+        let name = "币安人生 (BinanceLife)";
+        assert_eq!(name.chars().count(), 18);
+        assert_eq!(vis_width(name), 22);
+    }
+
+    #[test]
+    fn everything_the_tool_draws_is_one_column() {
+        for c in "●▲▼─┤└·…€$⣿⠛▁▂▃▄▅▆▇█".chars() {
+            assert_eq!(char_width(c), 1, "{c:?} would skew every column beside it");
+        }
+    }
+
+    #[test]
+    fn marks_and_emoji_are_counted_as_they_are_drawn() {
+        // A combining acute sits on the letter before it.
+        assert_eq!(vis_width("e\u{301}"), 1);
+        // Emoji take two columns, and coins get named after them.
+        assert_eq!(vis_width("🚀"), 2);
+    }
 }
