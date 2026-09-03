@@ -393,7 +393,7 @@ fn top_section(snap: &Snapshot, cfg: &Config, style: Style, decimals: usize) -> 
             // Three levels and no new colour: yours, ordinary, and pegged.
             if cfg.coins.iter().any(|c| c == &m.id) {
                 Cell::Chip(chip, row.color)
-            } else if crate::coins::STABLECOINS.contains(&m.id.as_str()) {
+            } else if crate::coingecko::is_pegged(m) {
                 Cell::Dim(chip)
             } else {
                 Cell::Plain(chip)

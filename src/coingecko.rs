@@ -177,23 +177,17 @@ impl Api {
 
     /// The most valuable coins, for regenerating the built-in list. No ids: the
     /// point is to find out which coins are worth carrying.
-    pub fn top_markets(
-        &self,
-        currency: &str,
-        count: usize,
-        category: Option<&str>,
-    ) -> Result<Vec<Market>> {
+    pub fn top_markets(&self, currency: &str, count: usize) -> Result<Vec<Market>> {
         let per_page = count.to_string();
-        let mut query = vec![
-            ("vs_currency", currency),
-            ("order", "market_cap_desc"),
-            ("per_page", per_page.as_str()),
-            ("page", "1"),
-        ];
-        if let Some(c) = category {
-            query.push(("category", c));
-        }
-        self.get("/coins/markets", &query)
+        self.get(
+            "/coins/markets",
+            &[
+                ("vs_currency", currency),
+                ("order", "market_cap_desc"),
+                ("per_page", per_page.as_str()),
+                ("page", "1"),
+            ],
+        )
     }
 
     pub fn market_chart(&self, id: &str, currency: &str, days: &str) -> Result<Series> {
@@ -245,6 +239,26 @@ impl Api {
         }
         Ok(out)
     }
+}
+
+/// Whether a coin held still all week: a stablecoin, or one of the tokenised
+/// dollar funds that behave like one.
+///
+/// Measured rather than looked up. CoinGecko has a stablecoins category, but it
+/// leaves out BUIDL, USYC and USDY — funds legally, dollars in practice — and
+/// carrying the list would mean shipping their data and refreshing it. The
+/// coin's own week says it plainly: everything pegged moves under 1% across it,
+/// and the quietest coin that is not moves 5%. The test is a ratio, so it is
+/// unaffected by the scaling that puts the week in the display currency, and a
+/// stablecoin that breaks its peg stops being greyed — which is the week you
+/// would want to see it.
+pub fn is_pegged(m: &Market) -> bool {
+    let Some(prices) = m.sparkline_in_7d.as_ref().map(|s| &s.price) else { return false };
+    if prices.len() < 2 {
+        return false;
+    }
+    let (lo, hi) = prices.iter().fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(*p), h.max(*p)));
+    lo > 0.0 && hi / lo < 1.02
 }
 
 pub fn is_rate_limit(e: &anyhow::Error) -> bool {
@@ -331,6 +345,31 @@ mod tests {
         let v: Vec<f64> = s.iter().map(|(_, p)| *p).collect();
         assert!((v[1] / v[0] - 1.10).abs() < 1e-9, "{v:?}");
         assert!((v[2] / v[1] - 105.0 / 110.0).abs() < 1e-9, "{v:?}");
+    }
+
+    #[test]
+    fn a_week_that_did_not_move_reads_as_pegged() {
+        // The real figures: every pegged coin in the top fifty moves under 1%
+        // across a week, and the quietest coin that is not moves five.
+        let flat = with_sparkline(vec![1.0000, 1.0004, 0.9998, 1.0002], 0.86);
+        assert!(is_pegged(&flat));
+        // A yield-bearing dollar fund drifts upward, and still counts.
+        let drifting = with_sparkline(vec![1.000, 1.003, 1.005, 1.008], 0.87);
+        assert!(is_pegged(&drifting));
+        // Bitcoin's quietest week in the sample was 5%.
+        let quiet_coin = with_sparkline(vec![100.0, 103.0, 101.0, 105.0], 90.0);
+        assert!(!is_pegged(&quiet_coin));
+        // A peg that broke is not a peg, and should not be greyed out.
+        let depegged = with_sparkline(vec![1.0, 1.0, 0.93, 0.91], 0.78);
+        assert!(!is_pegged(&depegged));
+    }
+
+    #[test]
+    fn a_coin_with_no_week_behind_it_is_not_pegged() {
+        let mut m = with_sparkline(vec![1.0, 1.0], 1.0);
+        m.sparkline_in_7d = None;
+        assert!(!is_pegged(&m));
+        assert!(!is_pegged(&with_sparkline(vec![1.0], 1.0)), "one point says nothing");
     }
 
     #[test]

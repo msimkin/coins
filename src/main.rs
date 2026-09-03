@@ -350,7 +350,7 @@ fn ticker_to_id(cfg: &Config, query: &str) -> Option<String> {
 /// and they silently misalign every column to their right.
 fn popular(cfg: &Config) -> Result<()> {
     let api = coingecko::Api::new(&cfg.api_key);
-    let markets = api.top_markets("usd", 250, None)?;
+    let markets = api.top_markets("usd", 250)?;
     println!("/// (id, symbol, name), most valuable first.");
     println!("pub const POPULAR: &[(&str, &str, &str)] = &[");
     for m in &markets {
@@ -363,18 +363,6 @@ fn popular(cfg: &Config) -> Result<()> {
     }
     println!("];");
 
-    // CoinGecko's own categorisation rather than a guess at one. A pegged coin
-    // can be told from its behaviour — a week without a move — but only while
-    // the currency it is pegged to sits still against the one on the screen.
-    let stable = api.top_markets("usd", 100, Some("stablecoins"))?;
-    println!();
-    println!("/// Coins pegged to a currency, which `coins top` shows in grey:");
-    println!("/// they are dollars in another wrapper, not price action.");
-    println!("pub const STABLECOINS: &[&str] = &[");
-    for m in &stable {
-        println!("    {:?},", m.id.trim());
-    }
-    println!("];");
     Ok(())
 }
 
