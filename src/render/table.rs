@@ -513,11 +513,12 @@ fn holdings_section(
                 if style.tight { 8 } else { 20 },
             )));
         }
-        cells.push(Cell::Bold(fmt::money_with(
-            amount * price_of(id),
-            &snap.currency,
-            values,
-        )));
+        // A holding whose coin has no price shows no figure, rather than a
+        // convincing €0.00.
+        cells.push(match snap.rows.iter().find(|r| &r.market.id == *id) {
+            Some(r) if r.market.current_price.is_none() => Cell::Dim("·".into()),
+            _ => Cell::Bold(fmt::money_with(amount * price_of(id), &snap.currency, values)),
+        });
         // A holding's amount is fixed over the period, so its change is its
         // coin's change — the same figure, in the same column.
         cells.extend(changes.iter().map(|c| delta_cell(row.change(c))));
@@ -541,10 +542,19 @@ fn holdings_section(
     // holding is its own total, so it gets no summary.
     let mut rule = None;
     if rows.len() > 1 {
+        let priced = |id: &str| {
+            snap.rows
+                .iter()
+                .find(|r| r.market.id == id)
+                .is_some_and(|r| r.market.current_price.is_some())
+        };
         let total: f64 = holdings
             .iter()
+            .filter(|(_, id, _)| priced(id))
             .map(|(_, id, amount)| amount * price_of(id))
             .sum();
+        // Nothing could be valued, so there is no total — not a total of zero.
+        let any_priced = holdings.iter().any(|(_, id, _)| priced(id));
         // Set here rather than after the fact, so the rule cannot outlive the
         // row it belongs to: the money column is where the total's own figure
         // goes, two columns in when the labels have a column of their own.
@@ -559,7 +569,11 @@ fn holdings_section(
             // lower-case words of exactly this kind.
             cells.push(Cell::Dim("total".into()));
         }
-        cells.push(Cell::Bold(fmt::money_with(total, &snap.currency, values)));
+        cells.push(if any_priced {
+            Cell::Bold(fmt::money_with(total, &snap.currency, values))
+        } else {
+            Cell::Dim("·".into())
+        });
         cells.extend(
             changes
                 .iter()

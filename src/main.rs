@@ -206,8 +206,16 @@ fn screen(
     coin: Option<String>,
     top_count: Option<usize>,
 ) -> Result<()> {
-    // `coins top` needs nothing tracked: the market is the subject.
-    if cfg.coins.is_empty() && coin.is_none() && view != View::Top {
+    // `coins top` needs nothing tracked: the market is the subject. Nor does a
+    // config with a wallet or an off-chain holding in it — those name coins of
+    // their own, and telling someone who has just added an address that they
+    // have nothing tracked is both wrong and unhelpable.
+    let nothing_to_show = cfg.coins.is_empty()
+        && cfg.wallets.is_empty()
+        && cfg.holdings.is_empty()
+        && coin.is_none()
+        && view != View::Top;
+    if nothing_to_show {
         bail!("nothing tracked yet — add a coin with `coins add bitcoin`");
     }
     let inline_plots = cfg.inline_plot && !cli.no_plot;
@@ -384,7 +392,7 @@ fn add(cfg: &Config, what: &[String], label: Option<&str>, theme: &Theme) -> Res
         }
         if item.starts_with("0x") || item.len() > 30 {
             bail!(
-                "{item:?} looks like an address but matches no format price knows\n\
+                "{item:?} looks like an address but matches no format coins knows\n\
                  Ethereum: 0x + 40 hex characters\n\
                  Solana:   43-44 base58 characters (no 0, O, I or l)"
             );

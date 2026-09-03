@@ -480,6 +480,14 @@ impl Fetcher {
     /// and coins too cheap to render at the configured ceiling.
     fn price_warnings(&self, needed: &[String], markets: &[Market], status: Status) -> Vec<String> {
         let mut out = Vec::new();
+        for m in markets.iter().filter(|m| needed.iter().any(|id| id == &m.id)) {
+            if m.current_price.is_none() {
+                out.push(format!(
+                    "coingecko has no price for {:?} — anything held in it cannot be valued",
+                    m.id
+                ));
+            }
+        }
         for id in needed {
             if !markets.iter().any(|m| &m.id == id) {
                 // Whether the coin has no data or merely no *cached* data is the
@@ -531,13 +539,19 @@ impl Fetcher {
         };
         for wallet in &mut per_wallet {
             wallet.amounts.retain(|id, amount| {
-                let price = markets
-                    .iter()
-                    .find(|m| &m.id == id)
-                    .and_then(|m| m.current_price)
-                    .unwrap_or(0.0);
-                let value = price * *amount;
-                value > 0.0 && !crate::render::fmt::rounds_to_zero(value, 2)
+                let price = markets.iter().find(|m| &m.id == id).and_then(|m| m.current_price);
+                match price {
+                    // Dust: airdrops and contract leftovers, worth less than a
+                    // hundredth of the display currency.
+                    Some(price) => {
+                        let value = price * *amount;
+                        value > 0.0 && !crate::render::fmt::rounds_to_zero(value, 2)
+                    }
+                    // A holding nobody can price is not a holding worth nothing.
+                    // Treating the two alike deleted it from the screen, and a
+                    // config with two wallets in it was told it held nothing.
+                    None => *amount > 0.0,
+                }
             });
         }
         let mut merged: BTreeMap<String, f64> = BTreeMap::new();
