@@ -22,7 +22,8 @@ columns        = ["1h", "24h", "7d"]       # change columns, left to right, from
                             # cost one cached chart per coin, the rest are free
 
 inline_plot    = false      # add a small sparkline to the right of every row;
-                            # off leaves the table as numbers only
+                            # off leaves the table as numbers only. `coins top`
+                            # never draws them, whatever this says
 show_addresses = false      # whether plain `coins` also shows what you hold;
                             # `coins balance` shows it either way
 balance        = "all"      # what `coins balance` shows: all (prices and what

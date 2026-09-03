@@ -121,7 +121,7 @@ pub fn table(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> Rend
                 // Only the coin rows carry a plot, so its budget is what is
                 // left on *their* line — the address columns no longer compete
                 // for the same space.
-                let plot = if cfg.inline_plot && snap.show_coins {
+                let plot = if cfg.inline_plot && snap.show_coins && snap.view != View::Top {
                     width.saturating_sub(m.coins + GAP).min(MAX_PLOT)
                 } else {
                     0
@@ -304,43 +304,26 @@ fn coins_section(
 /// palette holds six hues and clamps past them, so fifty coloured rows would be
 /// forty-five identical dots, and "where do mine sit" is the only question this
 /// screen answers that a website does not.
-fn top_section(
-    snap: &Snapshot,
-    cfg: &Config,
-    style: Style,
-    trend_cells: usize,
-    decimals: usize,
-) -> Section {
+fn top_section(snap: &Snapshot, cfg: &Config, style: Style, decimals: usize) -> Section {
     // Only the periods the prices request answers: a `3m` or `6m` column is a
     // chart per coin, and fifty of those is not a screen anyone should pay for.
     let changes = cfg.market_columns();
-    let mut header = vec!["#".to_string(), "COIN".to_string()];
-    if style.with_name {
-        header.push("NAME".to_string());
-    }
+    let mut header = vec!["#".to_string(), "COIN".to_string(), "NAME".to_string()];
     header.push("PRICE".to_string());
-    header.push("MARKET CAP".to_string());
+    // `VALUE` rather than `MARKET CAP`: the figures under it are six characters
+    // wide and the longer heading spent five more on every row, which is what
+    // pushed the names off a narrow screen.
+    header.push("VALUE".to_string());
     for c in &changes {
         header.push(c.to_ascii_uppercase());
     }
-    // The week that came with the prices, for every coin here — this view has no
-    // charts of its own and asks for none.
-    let mut tail_header = Vec::new();
-    let mut tail_align = Vec::new();
-    if trend_cells > 0 {
-        tail_header.push("7 DAYS".to_string());
-        tail_align.push(Align::Left);
-    }
-
     let mut rows = Vec::new();
-    let mut tail_rows = Vec::new();
     let blank = |n: usize| vec![Cell::Plain(String::new()); n];
     for (i, row) in snap.rows.iter().enumerate() {
         // Where the ranked coins end and your own, from further down, begin.
         if Some(i) == snap.top_break {
             let width = rows.last().map_or(0, |r: &Vec<Cell>| r.len());
             rows.push(blank(width));
-            tail_rows.push(blank(tail_header.len()));
         }
         let m = &row.market;
         let chip = format!("● {}", m.ticker());
@@ -358,9 +341,10 @@ fn top_section(
                 Cell::Plain(chip)
             },
         ];
-        if style.with_name {
-            cells.push(Cell::Dim(fmt::clean_text(&m.name)));
-        }
+        // Shortened rather than dropped: a row of tickers and figures with no
+        // names is a worse screen than one with `Wrapped…` in it.
+        let name = fmt::clean_text(&m.name);
+        cells.push(Cell::Dim(if style.with_name { name } else { shorten(&name, 9) }));
         cells.push(match m.current_price {
             Some(p) => Cell::Bold(fmt::money_with(p, &snap.currency, decimals)),
             None => Cell::Dim("·".into()),
@@ -371,22 +355,18 @@ fn top_section(
         });
         cells.extend(changes.iter().map(|c| delta_cell(row.change(c))));
         rows.push(cells);
-        if trend_cells > 0 {
-            let prices = trend_prices(row, false);
-            tail_rows.push(vec![Cell::Trend(
-                fmt::sparkline(&prices, trend_cells),
-                row.color,
-            )]);
-        }
     }
     let width = rows.first().map_or(0, |r| r.len());
     Section {
         header,
         align: vec![None; width],
         rows,
-        tail_header,
-        tail_align,
-        tail_rows,
+        // No sparklines here whatever `inline_plot` says: fifty of them beside
+        // fifty ranks is a wall of ink, and this screen is for reading places
+        // in a market, not shapes.
+        tail_header: Vec::new(),
+        tail_align: Vec::new(),
+        tail_rows: Vec::new(),
         rule: None,
     }
 }
@@ -545,14 +525,15 @@ fn build(
         let changes = cfg.market_columns();
         let decimals =
             fmt::column_decimals(snap.rows.iter().filter_map(|r| r.market.current_price));
-        let mut columns = vec![Column { align: Align::Right }, Column { align: Align::Left }];
-        if style.with_name {
-            columns.push(Column { align: Align::Left });
-        }
+        let mut columns = vec![
+            Column { align: Align::Right },
+            Column { align: Align::Left },
+            Column { align: Align::Left },
+        ];
         columns.push(Column { align: Align::Right });
         columns.push(Column { align: Align::Right });
         columns.extend(changes.iter().map(|_| Column { align: Align::Right }));
-        return (columns, vec![top_section(snap, cfg, style, trend_cells, decimals)]);
+        return (columns, vec![top_section(snap, cfg, style, decimals)]);
     }
     let holdings = holdings_of(snap, style.with_addresses);
     // The second column holds a coin's name among the coins and the wallet's

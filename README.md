@@ -74,7 +74,7 @@ currency    = "usd"                    # any CoinGecko vs_currency: usd, eur, gb
 range       = "1w"                     # how much history a chart covers
 columns     = ["1h", "24h", "7d"]      # 1h 24h 7d 14d 30d 3m 6m 200d 1y
 
-inline_plot = false                    # add a sparkline to the right of every row
+inline_plot = false                    # a sparkline on every row, except in `coins top`
 show_addresses = false                 # let plain `coins` show holdings too
 balance     = "all"                    # `coins balance`: all | addresses
 height      = 14                       # chart height, in terminal rows
@@ -146,9 +146,9 @@ the coin's place in the whole market, so a coin of yours from further down appea
 below the rest at its own rank rather than at the end of the queue:
 
 ```
-    7  ● SOL   Solana        €85.976      €50.3B  ▼0.1%  ▲1.4%  ▲35.1%  ▼52.0%
+    7  ● SOL   Solana        €85.976  €50.3B  ▼0.1%  ▲1.4%  ▲35.1%  ▼52.0%
 
-  174  ● STRK  Starknet       €0.023       €165M  ▼0.2%  ▲4.8%   ▲7.5%  ▼78.5%
+  174  ● STRK  Starknet       €0.023   €165M  ▼0.2%  ▲4.8%   ▲7.5%  ▼78.5%
 ```
 
 Your own coins keep their colour, pegged coins are greyed — they are dollars in
