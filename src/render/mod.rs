@@ -36,19 +36,16 @@ pub fn centre(lines: &[String], cols: usize, rows: usize) -> Vec<String> {
     out
 }
 
-/// Rewrites the lines just printed, in place, without touching anything above
-/// them.
+/// A frame written over what is already on the screen.
 ///
-/// A command run at a prompt does not own the screen — the frames above it are
-/// somebody's shell session — so the second paint walks back up over exactly what
-/// the first one printed rather than homing the cursor. Each line erases what it
-/// lands on and the tail is cleared, so a second frame may be shorter than the
-/// first without leaving a stub behind.
-pub fn redraw(lines: &[String], over: usize) -> String {
-    let mut out = String::new();
-    if over > 0 {
-        out.push_str(&format!("\x1b[{over}A"));
-    }
+/// Each line erases what it lands on and the tail below is cleared, so a frame
+/// may be shorter than the one it replaces without leaving a stub behind. Where
+/// it starts is the only difference between the two callers, and it matters: a
+/// display owns the screen and homes the cursor, while a command run at a prompt
+/// must not touch the shell session above it and walks back up over exactly what
+/// it printed.
+fn frame(lines: &[String], start: &str) -> String {
+    let mut out = String::from(start);
     for line in lines {
         out.push_str(line);
         out.push_str("\x1b[K\n");
@@ -57,20 +54,14 @@ pub fn redraw(lines: &[String], over: usize) -> String {
     out
 }
 
-/// One frame, ready to write over the last one.
-///
-/// Home the cursor, then erase each line as it is written rather than clearing
-/// the screen first — clearing leaves a blank flash between frames, and erasing
-/// per line leaves nothing of a longer frame behind. The last escape erases
-/// whatever is below, which is what makes a screen that shrinks look deliberate.
+/// From the top of the screen — for a display, which owns it.
 pub fn repaint(lines: &[String]) -> String {
-    let mut out = String::from("\x1b[H");
-    for line in lines {
-        out.push_str(line);
-        out.push_str("\x1b[K\n");
-    }
-    out.push_str("\x1b[J");
-    out
+    frame(lines, "\x1b[H")
+}
+
+/// Over the `over` lines just printed, leaving everything above them alone.
+pub fn redraw(lines: &[String], over: usize) -> String {
+    frame(lines, &if over > 0 { format!("\x1b[{over}A") } else { String::new() })
 }
 
 pub fn screen(snap: &Snapshot, cfg: &Config, theme: &Theme, term_width: usize) -> Vec<String> {
