@@ -20,6 +20,22 @@ const MAX_WIDTH: usize = 128;
 const MAX_CHART_WIDTH: usize = 208;
 
 /// The whole screen, as lines ready to print.
+/// One frame, ready to write over the last one.
+///
+/// Home the cursor, then erase each line as it is written rather than clearing
+/// the screen first — clearing leaves a blank flash between frames, and erasing
+/// per line leaves nothing of a longer frame behind. The last escape erases
+/// whatever is below, which is what makes a screen that shrinks look deliberate.
+pub fn repaint(lines: &[String]) -> String {
+    let mut out = String::from("\x1b[H");
+    for line in lines {
+        out.push_str(line);
+        out.push_str("\x1b[K\n");
+    }
+    out.push_str("\x1b[J");
+    out
+}
+
 pub fn screen(snap: &Snapshot, cfg: &Config, theme: &Theme, term_width: usize) -> Vec<String> {
     let cap = if snap.show_table { MAX_WIDTH } else { MAX_CHART_WIDTH };
     let width = term_width.min(cap).saturating_sub(INDENT.len() * 2);
@@ -487,6 +503,29 @@ fn allocation_bar(
         vec![joined.finish()]
     } else {
         vec![line.finish(), labels.finish().trim_start().to_string()]
+    }
+}
+
+#[cfg(test)]
+mod repaint_tests {
+    use super::repaint;
+
+    #[test]
+    fn a_frame_erases_what_the_last_one_left() {
+        let out = repaint(&["one".into(), "two".into()]);
+        // Home first, or the frame walks down the screen.
+        assert!(out.starts_with("\x1b[H"), "{out:?}");
+        // Every line erases to its end, so a shorter line cannot leave the tail
+        // of the line it replaced.
+        assert_eq!(out.matches("\x1b[K").count(), 2, "{out:?}");
+        // And the screen below the last line goes, so a shorter frame shrinks.
+        assert!(out.ends_with("\x1b[J"), "{out:?}");
+        assert!(out.contains("one\x1b[K\ntwo\x1b[K\n"), "{out:?}");
+    }
+
+    #[test]
+    fn an_empty_frame_still_clears() {
+        assert_eq!(repaint(&[]), "\x1b[H\x1b[J");
     }
 }
 

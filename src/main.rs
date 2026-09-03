@@ -12,6 +12,9 @@ mod portfolio;
 mod render;
 mod wallet;
 
+use std::io::{IsTerminal, Write};
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
@@ -46,6 +49,10 @@ struct Cli {
     /// Ignore the cache and fetch now
     #[arg(long, global = true)]
     refresh: bool,
+
+    /// Keep the screen up to date, redrawing every `live` seconds
+    #[arg(long, global = true)]
+    live: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -204,15 +211,78 @@ fn screen(
         bail!("nothing tracked yet — add a coin with `coins add bitcoin`");
     }
     let inline_plots = cfg.inline_plot && !cli.no_plot;
+    let interval = cfg.live;
     let fetcher = Fetcher::new(cfg, cli.refresh)?;
+    // Once, whatever happens next: a currency the API cannot quote is not a
+    // thing that comes right on the next tick.
     fetcher.validate_currency()?;
-    let snap = fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count)?;
-    for line in render::screen(&snap, &fetcher.cfg, theme, term_width()) {
-        println!("{line}");
+
+    if !cli.live {
+        let snap = fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count)?;
+        for line in render::screen(&snap, &fetcher.cfg, theme, term_width()) {
+            println!("{line}");
+        }
+        // A blank line, so the next prompt is not flush against the table.
+        println!();
+        return Ok(());
     }
-    // A blank line, so the next prompt is not flush against the table.
-    println!();
-    Ok(())
+    live(fetcher, theme, view, coin, top_count, inline_plots, interval)
+}
+
+/// Redraws the screen every `interval` until interrupted.
+///
+/// In place: the cursor goes home and each line erases what it lands on, so
+/// there is no blank flash between frames and nothing of the terminal is taken
+/// over. Ctrl-C, a kill, or a power cut all leave the terminal as they found it,
+/// because nothing was changed that would need putting back.
+fn live(
+    mut fetcher: Fetcher,
+    theme: &Theme,
+    view: View,
+    coin: Option<String>,
+    top_count: Option<usize>,
+    inline_plots: bool,
+    interval: Duration,
+) -> Result<()> {
+    if !std::io::stdout().is_terminal() {
+        bail!(
+            "`--live` redraws a terminal, and this is not one\n\
+             for a file or a pipe, run it on a timer instead: `watch -n60 coins`"
+        );
+    }
+    fetcher.set_live();
+    let mut out = std::io::stdout().lock();
+    let mut last: Vec<String> = Vec::new();
+    let mut next = Instant::now();
+    loop {
+        match fetcher.snapshot(coin.as_deref(), view, inline_plots, top_count) {
+            Ok(snap) => last = render::screen(&snap, &fetcher.cfg, theme, term_width()),
+            // A display does not go out because the network did. The last frame
+            // stands, with a line under it saying what happened — and the age in
+            // its header keeps climbing, which is the honest part.
+            Err(e) => {
+                let secs = interval.as_secs();
+                // The first line only: a display says what is wrong and when it
+                // will try again, and the advice underneath is for someone at a
+                // keyboard, who can read it by running the command.
+                let said = format!("{e:#}");
+                let first = said.lines().next().unwrap_or_default();
+                let note = format!("! {first} — trying again in {secs}s");
+                last.retain(|l| !l.starts_with("! "));
+                last.push(String::new());
+                last.push(format!("  {}", theme.dim(&note)));
+            }
+        }
+        write!(out, "{}", render::repaint(&last))?;
+        out.flush()?;
+        // Measured from the last wake rather than from now, so a slow fetch does
+        // not walk the clock forward a little on every tick.
+        next += interval;
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        // `--refresh` is for the frame you asked for, not for every frame from
+        // now until the machine is switched off.
+        fetcher.stop_forcing();
+    }
 }
 
 /// `add` takes a coin or a wallet — an address is unmistakable by shape, so one

@@ -30,6 +30,9 @@ balance        = "all"      # what `coins balance` shows: all (prices and what
                             # you hold) | addresses (only what you hold, so the
                             # two commands divide the screen between them)
 height         = 14         # height of a `coins plot` chart, in terminal rows
+live           = 60         # seconds between redraws under `--live`. Prices are
+                            # cached for a minute, so a faster tick redraws the
+                            # same numbers
 top            = 50         # rows in `coins top`, 1 to 50. It shows the change
                             # columns that arrive with the prices; 3m and 6m are
                             # a chart per coin, so fifty of them are left out
@@ -187,6 +190,8 @@ struct Raw {
     height: usize,
     #[serde(default = "default_top")]
     top: usize,
+    #[serde(default = "default_live")]
+    live: u64,
     #[serde(default)]
     inline_plot: bool,
     #[serde(default)]
@@ -239,6 +244,9 @@ fn default_height() -> usize {
 fn default_top() -> usize {
     50
 }
+fn default_live() -> u64 {
+    60
+}
 fn default_balance() -> String {
     "all".into()
 }
@@ -261,6 +269,8 @@ pub struct Config {
     /// on the screen; `coins balance` shows it when you want it.
     pub show_addresses: bool,
     pub balance: BalanceView,
+    /// Seconds between redraws under `--live`.
+    pub live: Duration,
     /// Rows in `coins top`. Fifty is every coin the prices request carries, so
     /// the screen never costs a request whatever this says.
     pub top: usize,
@@ -366,6 +376,7 @@ impl Config {
             show_addresses: raw.show_addresses,
             balance: BalanceView::parse(&raw.balance)?,
             top: raw.top.clamp(1, 50),
+            live: Duration::from_secs(raw.live.clamp(5, 86_400)),
             thousands: raw.thousands.clone(),
             max_decimals: raw.max_decimals.min(10),
             columns: raw.columns.iter().map(|c| c.to_ascii_lowercase()).collect(),
@@ -820,6 +831,7 @@ mod template_tests {
             "show_addresses",
             "balance",
             "top",
+            "live",
             "height",
             "thousands",
             "max_decimals",

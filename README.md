@@ -64,6 +64,27 @@ coins: no coin is called "bitcon" — did you mean one of these?
 The 250 largest coins are built in, so `coins add btc` needs no request. Tab
 completion offers the same list.
 
+## A screen that keeps itself current
+
+`--live` turns any view into a display that redraws on a timer:
+
+```sh
+coins --live           # the prices
+coins balance --live   # what you hold
+coins top --live       # the market
+```
+
+`live = 60` in the config sets the seconds between redraws — prices are cached for
+a minute, so a faster tick repaints the same numbers. It redraws in place and takes
+nothing over, so Ctrl-C, a kill, or a pulled plug all leave the terminal as they
+found it. A refresh that fails does not clear the screen: the last frame stays, with
+a line saying what happened and when the next attempt is, and the age in the header
+keeps climbing.
+
+For a machine that boots into it — a Raspberry Pi wired to a small screen — that is
+the whole setup, plus `setterm -cursor off` to hide the cursor and an autologin
+shell or a systemd unit to start it.
+
 ## Configure
 
 Everything lives in `~/.config/coins/config.toml`:
@@ -79,6 +100,7 @@ show_addresses = false                 # let plain `coins` show holdings too
 balance     = "all"                    # `coins balance`: all | addresses
 height      = 14                       # chart height, in terminal rows
 top         = 50                       # rows in `coins top`, 1 to 50
+live        = 60                       # seconds between redraws under `--live`
 thousands   = " "                      # digit grouping: " " | "," | "." | ""
 max_decimals = 3                       # ceiling on price decimals
 theme       = "dark"                   # dark | light

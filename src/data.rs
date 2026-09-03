@@ -135,6 +135,11 @@ impl Snapshot {
 
 pub struct Fetcher {
     pub cfg: Config,
+    /// A display that redraws on its own schedule. It refreshes what it needs
+    /// itself, so nothing is gained by spawning a warmer — and a warmer spawned
+    /// once a minute by a process that never exits is a defunct child once a
+    /// minute.
+    live: bool,
     pub api: Api,
     pub cache: Cache,
     /// `--refresh`: ignore cached values.
@@ -145,7 +150,18 @@ impl Fetcher {
     pub fn new(cfg: Config, force: bool) -> Result<Fetcher> {
         let api = Api::new(&cfg.api_key);
         let cache = Cache::new(crate::config::cache_home()?);
-        Ok(Fetcher { cfg, api, cache, force })
+        Ok(Fetcher { cfg, api, cache, force, live: false })
+    }
+
+    /// A display refreshes itself, so it warms nothing and forces nothing after
+    /// its first frame — `--refresh` every minute for a week is what the rate
+    /// limit exists to stop.
+    pub fn set_live(&mut self) {
+        self.live = true;
+    }
+
+    pub fn stop_forcing(&mut self) {
+        self.force = false;
     }
 
     /// Checks the configured display currency against CoinGecko's list.
@@ -331,7 +347,7 @@ impl Fetcher {
             if complete && hit.age < MARKETS_TTL {
                 return (hit.value, hit.age, Status::Fresh);
             }
-            if complete && hit.age < WARM_WINDOW {
+            if complete && hit.age < WARM_WINDOW && !self.live {
                 // Show what we have now; make the next run fresh.
                 self.cache.spawn_warm();
                 return (hit.value, hit.age, Status::Warming);
