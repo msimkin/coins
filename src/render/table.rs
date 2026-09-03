@@ -105,7 +105,56 @@ pub struct Rendered {
 
 /// Renders the table. The per-row plot takes whatever width the other columns
 /// leave, so it grows with the terminal instead of sitting at a fixed size.
+/// The narrowest a name column is worth having. Below this it says nothing that
+/// the ticker beside it has not already said.
+const MIN_NAME: usize = 6;
+
+/// How the market list spends whatever width the figures leave on names.
+///
+/// Three outcomes, in the order they are preferred: every name whole; the column
+/// capped, so the long ones end in `…` and the rest are untouched; or no column
+/// at all, when so little is left that most names would be stumps.
+fn name_style(snap: &Snapshot, cfg: &Config, width: usize) -> Style {
+    let bare = Style { with_name: false, name_cap: None, tight: false, with_addresses: false };
+    let lengths: Vec<usize> = snap
+        .rows
+        .iter()
+        .map(|r| vis_width(&fmt::clean_text(&r.market.name)))
+        .collect();
+    let room = width.saturating_sub(measure(snap, cfg, bare).widest + GAP);
+    match name_plan(&lengths, room) {
+        NamePlan::None => bare,
+        NamePlan::Whole => Style { with_name: true, ..bare },
+        NamePlan::Cut(cap) => Style { with_name: true, name_cap: Some(cap), ..bare },
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NamePlan {
+    Whole,
+    Cut(usize),
+    None,
+}
+
+/// What to do with the names, given the room left for them: all of them whole,
+/// the column cut to what there is, or no column at all. Most of them readable
+/// is worth a few ellipses; most of them cut to stumps is not worth the column.
+fn name_plan(lengths: &[usize], room: usize) -> NamePlan {
+    let Some(&longest) = lengths.iter().max() else { return NamePlan::None };
+    if room >= longest {
+        return NamePlan::Whole;
+    }
+    let fit = lengths.iter().filter(|l| **l <= room).count();
+    if room >= MIN_NAME && fit * 2 >= lengths.len() {
+        return NamePlan::Cut(room);
+    }
+    NamePlan::None
+}
+
 pub fn table(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> Rendered {
+    if snap.view == View::Top {
+        return emitted(snap, cfg, theme, name_style(snap, cfg, width), 0);
+    }
     // Degrade in order of what the screen is for. The address rows outrank the
     // coin's full name and the plot, but they add two columns, so on a narrow
     // terminal they go compact and then go entirely rather than overflow.
@@ -113,7 +162,7 @@ pub fn table(snap: &Snapshot, cfg: &Config, theme: &Theme, width: usize) -> Rend
         let tights: &[bool] = if with_addresses { &[false, true] } else { &[false] };
         for &tight in tights {
             for with_name in [true, false] {
-                let style = Style { with_name, tight, with_addresses };
+                let style = Style { with_name, name_cap: None, tight, with_addresses };
                 let m = measure(snap, cfg, style);
                 if m.widest > width {
                     continue;
@@ -197,6 +246,9 @@ fn tail_widths(section: &Section) -> Vec<usize> {
 #[derive(Debug, Clone, Copy)]
 struct Style {
     with_name: bool,
+    /// The market list's name column, capped to this many characters. `None`
+    /// leaves the names whole; the other views do not use it.
+    name_cap: Option<usize>,
     /// Shorter wallet labels and coarser amounts, to keep the address rows on
     /// a narrow terminal instead of dropping them.
     tight: bool,
@@ -205,7 +257,7 @@ struct Style {
 
 impl Style {
     fn bare() -> Style {
-        Style { with_name: false, tight: true, with_addresses: false }
+        Style { with_name: false, name_cap: None, tight: true, with_addresses: false }
     }
 }
 
@@ -308,7 +360,10 @@ fn top_section(snap: &Snapshot, cfg: &Config, style: Style, decimals: usize) -> 
     // Only the periods the prices request answers: a `3m` or `6m` column is a
     // chart per coin, and fifty of those is not a screen anyone should pay for.
     let changes = cfg.market_columns();
-    let mut header = vec!["#".to_string(), "COIN".to_string(), "NAME".to_string()];
+    let mut header = vec!["#".to_string(), "COIN".to_string()];
+    if style.with_name {
+        header.push("NAME".to_string());
+    }
     header.push("PRICE".to_string());
     // `VALUE` rather than `MARKET CAP`: the figures under it are six characters
     // wide and the longer heading spent five more on every row, which is what
@@ -326,7 +381,10 @@ fn top_section(snap: &Snapshot, cfg: &Config, style: Style, decimals: usize) -> 
             rows.push(blank(width));
         }
         let m = &row.market;
-        let chip = format!("● {}", m.ticker());
+        // One `FIGR_HELOC` among fifty coins would widen this column for all of
+        // them, and it is the names that pay for it. Tickers are five characters
+        // or fewer with very few exceptions, so the exceptions are cut instead.
+        let chip = format!("● {}", shorten(&m.ticker(), 6));
         let mut cells = vec![
             match m.market_cap_rank {
                 Some(r) => Cell::Dim(r.to_string()),
@@ -341,10 +399,13 @@ fn top_section(snap: &Snapshot, cfg: &Config, style: Style, decimals: usize) -> 
                 Cell::Plain(chip)
             },
         ];
-        // Shortened rather than dropped: a row of tickers and figures with no
-        // names is a worse screen than one with `Wrapped…` in it.
-        let name = fmt::clean_text(&m.name);
-        cells.push(Cell::Dim(if style.with_name { name } else { shorten(&name, 9) }));
+        if style.with_name {
+            let name = fmt::clean_text(&m.name);
+            cells.push(Cell::Dim(match style.name_cap {
+                Some(cap) => shorten(&name, cap),
+                None => name,
+            }));
+        }
         cells.push(match m.current_price {
             Some(p) => Cell::Bold(fmt::money_with(p, &snap.currency, decimals)),
             None => Cell::Dim("·".into()),
@@ -525,11 +586,10 @@ fn build(
         let changes = cfg.market_columns();
         let decimals =
             fmt::column_decimals(snap.rows.iter().filter_map(|r| r.market.current_price));
-        let mut columns = vec![
-            Column { align: Align::Right },
-            Column { align: Align::Left },
-            Column { align: Align::Left },
-        ];
+        let mut columns = vec![Column { align: Align::Right }, Column { align: Align::Left }];
+        if style.with_name {
+            columns.push(Column { align: Align::Left });
+        }
         columns.push(Column { align: Align::Right });
         columns.push(Column { align: Align::Right });
         columns.extend(changes.iter().map(|_| Column { align: Align::Right }));
@@ -700,6 +760,22 @@ fn pad_cell(line: &mut SLine, text: &str, painted: String, width: usize, align: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_are_kept_whole_cut_or_dropped_by_the_room_there_is() {
+        let names = [7, 8, 8, 11, 12, 20];
+        // Room for the longest: nothing is cut.
+        assert_eq!(name_plan(&names, 20), NamePlan::Whole);
+        assert_eq!(name_plan(&names, 25), NamePlan::Whole);
+        // Room for most of them: the long ones lose their tails.
+        assert_eq!(name_plan(&names, 11), NamePlan::Cut(11));
+        assert_eq!(name_plan(&names, 8), NamePlan::Cut(8));
+        // Room for hardly any: the column is worth less than the width it takes.
+        assert_eq!(name_plan(&names, 7), NamePlan::None);
+        assert_eq!(name_plan(&names, 5), NamePlan::None);
+        assert_eq!(name_plan(&names, 0), NamePlan::None);
+        assert_eq!(name_plan(&[], 40), NamePlan::None);
+    }
 
     #[test]
     fn a_rule_covers_the_summed_columns_and_no_others() {
